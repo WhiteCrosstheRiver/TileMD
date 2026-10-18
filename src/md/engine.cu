@@ -17,6 +17,7 @@
 
 #include "core/device_status.hpp"
 #include "md/tile_force.hpp"
+#include "md/tile_thermo.hpp"
 #include "neighbor/cluster_list.hpp"
 
 namespace tilemd {
@@ -696,6 +697,7 @@ struct Engine::Impl {
   int npartial = 0;
   bool thermo_origin_written = false;
   bool leapfrog_ready = false;
+  int tile_step = 0;
   bool tile_ready = false;
   int* tile_type = nullptr;
   int* tile_gid = nullptr;
@@ -1482,11 +1484,7 @@ void Engine::Impl::LaunchTileStep(float4* pos_cur, float4* pos_out) {
   if (system.shift == Shift::Energy) lj_shift = LjShift::Energy;
   if (system.shift == Shift::Force) lj_shift = LjShift::Force;
   int record = -1;
-  if (system.thermo_every > 0) {
-    int step = 0;
-    TILEMD_CHECK(cudaMemcpy(&step, step_counter, sizeof(step), cudaMemcpyDeviceToHost));
-    if (step % system.thermo_every == 0) record = step;
-  }
+  if (TileRecordsThermo(tile_step, system.thermo_every)) record = tile_step;
   if (record >= 0 && tile_ncluster > tile_partial_cap) {
     cudaFree(tile_partial);
     tile_partial = static_cast<TileThermoPartial*>(
@@ -1503,13 +1501,12 @@ void Engine::Impl::LaunchTileStep(float4* pos_cur, float4* pos_out) {
     CheckLaunch();
     DrainDeviceThermo();
   }
+  if (tile_ncluster > 0) ++tile_step;
   forces_ready = false;
 }
 
 void Engine::Impl::RecordClosingTileThermo() {
-  int step = 0;
-  TILEMD_CHECK(cudaMemcpy(&step, step_counter, sizeof(step), cudaMemcpyDeviceToHost));
-  if (system.thermo_every <= 0 || step % system.thermo_every != 0 || n <= 0) return;
+  if (!TileRecordsThermo(tile_step, system.thermo_every) || n <= 0) return;
   std::vector<double> hx(static_cast<size_t>(n));
   std::vector<double> hy(static_cast<size_t>(n));
   std::vector<double> hz(static_cast<size_t>(n));
@@ -1554,7 +1551,7 @@ void Engine::Impl::RecordClosingTileThermo() {
     ke += 0.5 * (ivx * ivx + ivy * ivy + ivz * ivz);
   }
   ThermoSample sample;
-  sample.step = step;
+  sample.step = tile_step;
   sample.kinetic_energy = ke;
   sample.potential_energy = raw.potential_energy;
   for (int axis = 0; axis < 6; ++axis) sample.virial[axis] = raw.virial[axis];

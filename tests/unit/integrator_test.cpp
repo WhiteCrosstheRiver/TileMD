@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "lj_reference.hpp"
+#include "md/tile_thermo.hpp"
 
 namespace {
 
@@ -95,6 +96,78 @@ TEST(Integrator, LeapfrogMatchesVerletFor100Steps) {
   std::cout << "leapfrog vs verlet max |dx| " << max_x << " max |dv| " << max_v << "\n";
   EXPECT_LT(max_x, 1.0e-8) << "position delta after 100 steps";
   EXPECT_LT(max_v, 1.0e-8) << "integer-time velocity delta after 100 steps";
+}
+
+tilemd::ref::Observables Observe(const tilemd::ref::System& origin,
+                                 const tilemd::ref::Dynamics& state) {
+  tilemd::ref::System system = origin;
+  system.x = state.x;
+  system.y = state.y;
+  system.z = state.z;
+  return tilemd::ref::Compute(system);
+}
+
+double Kinetic(const std::vector<double>& vx, const std::vector<double>& vy,
+               const std::vector<double>& vz) {
+  double ke = 0.0;
+  for (int i = 0; i < static_cast<int>(vx.size()); ++i) {
+    ke += 0.5 * (vx[static_cast<size_t>(i)] * vx[static_cast<size_t>(i)] +
+                 vy[static_cast<size_t>(i)] * vy[static_cast<size_t>(i)] +
+                 vz[static_cast<size_t>(i)] * vz[static_cast<size_t>(i)]);
+  }
+  return ke;
+}
+
+TEST(Integrator, FusedThermoStepsMatchVerlet) {
+  const std::vector<int> steps = tilemd::TileThermoSteps(8, 2);
+  ASSERT_EQ(steps.size(), 5u);
+  EXPECT_EQ(steps[0], 0);
+  EXPECT_EQ(steps[1], 2);
+  EXPECT_EQ(steps[2], 4);
+  EXPECT_EQ(steps[3], 6);
+  EXPECT_EQ(steps[4], 8);
+  EXPECT_TRUE(tilemd::TileThermoSteps(4, 0).empty());
+
+  tilemd::ref::System origin = SmallMelt();
+  std::vector<double> vx(40, 0.2);
+  std::vector<double> vy(40, -0.1);
+  std::vector<double> vz(40, 0.05);
+  constexpr double dt = 0.005;
+  constexpr double mass = 1.0;
+  constexpr int every = 2;
+  constexpr int nstep = 8;
+  tilemd::ref::System verlet_system = origin;
+  tilemd::ref::System leap_system = origin;
+  tilemd::ref::Dynamics verlet = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::Dynamics leap = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::PrepareLeapfrog(leap_system, leap, dt, mass);
+
+  for (int step = 0; step < nstep; ++step) {
+    if (tilemd::TileRecordsThermo(step, every)) {
+      std::vector<double> ivx;
+      std::vector<double> ivy;
+      std::vector<double> ivz;
+      tilemd::ref::IntegerTimeVelocity(leap_system, leap, dt, mass, ivx, ivy, ivz);
+      const tilemd::ref::Observables got = Observe(origin, leap);
+      const tilemd::ref::Observables oracle = Observe(origin, verlet);
+      EXPECT_NEAR(got.potential_energy, oracle.potential_energy, 1e-12);
+      EXPECT_NEAR(Kinetic(ivx, ivy, ivz), Kinetic(verlet.vx, verlet.vy, verlet.vz), 1e-12);
+      for (int axis = 0; axis < 6; ++axis) {
+        EXPECT_NEAR(got.virial[axis], oracle.virial[axis], 1e-12);
+      }
+    }
+    tilemd::ref::VelocityVerletStep(verlet_system, verlet, dt, mass);
+    tilemd::ref::LeapfrogStep(leap_system, leap, dt, mass);
+  }
+  ASSERT_TRUE(tilemd::TileRecordsThermo(nstep, every));
+  std::vector<double> ivx;
+  std::vector<double> ivy;
+  std::vector<double> ivz;
+  tilemd::ref::IntegerTimeVelocity(leap_system, leap, dt, mass, ivx, ivy, ivz);
+  const tilemd::ref::Observables got = Observe(origin, leap);
+  const tilemd::ref::Observables oracle = Observe(origin, verlet);
+  EXPECT_NEAR(got.potential_energy, oracle.potential_energy, 1e-12);
+  EXPECT_NEAR(Kinetic(ivx, ivy, ivz), Kinetic(verlet.vx, verlet.vy, verlet.vz), 1e-12);
 }
 
 TEST(Integrator, HalfStepAverageRecoversThePreMoveVelocity) {
