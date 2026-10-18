@@ -16,6 +16,8 @@
 #include <utility>
 
 #include "core/device_status.hpp"
+#include "md/emergency.hpp"
+#include "md/flag_nan.hpp"
 #include "md/run_plan.hpp"
 #include "md/tile_force.hpp"
 #include "md/tile_rebuild.hpp"
@@ -333,7 +335,7 @@ __global__ void __launch_bounds__(kBlock)
     int tj = LoadReadOnly(type + j);
     PairRow p = c_pairs[ti * kMaxTypes + tj];
     if (!p.defined) {
-      atomicExch(&status->nan_detected, 1);
+      FlagNonFinite(status, i);
       return;
     }
     // Double geometry. A float box of length ~17 already moves melt forces by
@@ -382,7 +384,7 @@ __global__ void __launch_bounds__(kBlock)
     wxz[i] = axz;
     wyz[i] = ayz;
   }
-  if (!isfinite(ax) || !isfinite(ay) || !isfinite(az)) atomicExch(&status->nan_detected, 1);
+  if (!isfinite(ax) || !isfinite(ay) || !isfinite(az)) FlagNonFinite(status, i);
 }
 
 __global__ void PublishRebuild(cudaGraphConditionalHandle handle, const DeviceStatus* status) {
@@ -779,6 +781,7 @@ struct Engine::Impl {
 
   void Upload();
   void ClearFlags();
+  [[noreturn]] void AbortIfNonFinite(int step, const DeviceStatus& host);
   void BuildCells();
   void ApplySpatialOrder();
   void QueueRebuild(cudaStream_t stream);
@@ -1132,11 +1135,39 @@ void Engine::Impl::Upload() {
   TILEMD_CHECK(cudaMemcpyToSymbol(c_thermo_every, &system.thermo_every, sizeof(int)));
 }
 
+void Engine::Impl::AbortIfNonFinite(int step, const DeviceStatus& host) {
+  const int slot = host.nan_slot;
+  int original = -1;
+  std::vector<double> hx(static_cast<size_t>(std::max(n, 0)));
+  std::vector<double> hy(hx.size());
+  std::vector<double> hz(hx.size());
+  std::vector<double> hvx(hx.size());
+  std::vector<double> hvy(hx.size());
+  std::vector<double> hvz(hx.size());
+  std::vector<int> htype(hx.size());
+  std::vector<int> hgid(hx.size());
+  if (n > 0) {
+    TILEMD_CHECK(cudaMemcpy(hx.data(), x, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hy.data(), y, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hz.data(), z, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hvx.data(), vx, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hvy.data(), vy, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hvz.data(), vz, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(htype.data(), type, sizeof(int) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hgid.data(), gid, sizeof(int) * n, cudaMemcpyDeviceToHost));
+    if (slot >= 0 && slot < n) original = hgid[static_cast<size_t>(slot)];
+  }
+  WriteEmergencyFrame("emergency.extxyz", system.box, hx.data(), hy.data(), hz.data(), hvx.data(),
+                      hvy.data(), hvz.data(), htype.data(), hgid.data(), n, step);
+  throw std::runtime_error(NonFiniteMessage(step, original));
+}
+
 void Engine::Impl::ClearFlags() {
   DeviceStatus previous{};
   TILEMD_CHECK(cudaMemcpy(&previous, status, sizeof(previous), cudaMemcpyDeviceToHost));
   DeviceStatus blank{};
   blank.rebuild_count = previous.rebuild_count;
+  blank.nan_slot = -1;
   TILEMD_CHECK(cudaMemcpy(status, &blank, sizeof(blank), cudaMemcpyHostToDevice));
   int zero = 0;
   TILEMD_CHECK(cudaMemcpy(max_nn, &zero, sizeof(zero), cudaMemcpyHostToDevice));
@@ -1904,6 +1935,8 @@ void Engine::Impl::RunClusterTiles(int steps) {
         DeviceStatus primed{};
         TILEMD_CHECK(cudaMemcpy(&primed, status, sizeof(primed), cudaMemcpyDeviceToHost));
         primed.overflow = 0;
+        primed.nan_detected = 0;
+        primed.nan_slot = -1;
         TILEMD_CHECK(cudaMemcpy(status, &primed, sizeof(primed), cudaMemcpyHostToDevice));
         TILEMD_CHECK(cudaGraphLaunch(graph.exec, graph.stream));
         TILEMD_CHECK(cudaStreamSynchronize(graph.stream));
@@ -1915,10 +1948,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
         if (missing_host) throw std::invalid_argument("missing pair coefficient");
         DeviceStatus finished{};
         TILEMD_CHECK(cudaMemcpy(&finished, status, sizeof(finished), cudaMemcpyDeviceToHost));
-        if (finished.nan_detected) {
-          throw std::runtime_error("non-finite force or position during integration at step " +
-                                   std::to_string(done));
-        }
+        if (finished.nan_detected) AbortIfNonFinite(done, finished);
         if (finished.overflow == 0 && !TileListStale()) DrainDeviceThermo();
         if (finished.overflow != 0 || TileListStale()) {
           RestoreSnapshot();
@@ -2100,10 +2130,7 @@ void Engine::Run(int steps) {
       TILEMD_CHECK(cudaGetLastError());
       DeviceStatus finished{};
       TILEMD_CHECK(cudaMemcpy(&finished, impl_->status, sizeof(finished), cudaMemcpyDeviceToHost));
-      if (finished.nan_detected) {
-        throw std::runtime_error("non-finite force or position during integration at step " +
-                                 std::to_string(done));
-      }
+      if (finished.nan_detected) impl_->AbortIfNonFinite(done, finished);
       if (!finished.overflow) break;
       if (++retries > 4) {
         throw std::runtime_error("neighbor list overflowed during integration at step " +

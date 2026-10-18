@@ -73,7 +73,7 @@ target_link_libraries(tilemd_eam PUBLIC tilemd_headers)
 target_compile_features(tilemd_eam PUBLIC cxx_std_17)
 target_link_libraries(tilemd_io PUBLIC tilemd_eam)
 
-add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp)
+add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp src/md/emergency.cpp)
 target_link_libraries(tilemd_cluster PUBLIC tilemd_headers)
 target_compile_features(tilemd_cluster PUBLIC cxx_std_17)
 target_link_libraries(tilemd_io PUBLIC tilemd_cluster)

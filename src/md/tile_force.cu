@@ -1,9 +1,11 @@
 #include <cuda_runtime.h>
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
 #include "core/device_status.hpp"
+#include "md/flag_nan.hpp"
 #include "md/tile_force.hpp"
 
 namespace tilemd {
@@ -303,6 +305,10 @@ __global__ void __launch_bounds__(32)
       integrate.z[atom_id] = zn;
       integrate.pos_next[atom_id] = make_float4(static_cast<float>(xn), static_cast<float>(yn),
                                                 static_cast<float>(zn), __int_as_float(ti));
+      if (integrate.status != nullptr && (!isfinite(rx) || !isfinite(ry) || !isfinite(rz) ||
+                                          !isfinite(xn) || !isfinite(yn) || !isfinite(zn))) {
+        FlagNonFinite(integrate.status, atom_id);
+      }
     }
     if (record >= 0 && j_sub == 0 && atom_id >= 0) {
       const double half_scale = 0.5 * integrate.dt * integrate.inv_mass;
