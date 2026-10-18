@@ -383,3 +383,55 @@ TEST(Input, EamRunMatchesLammpsCopper) {
   std::filesystem::remove(xyz);
   std::filesystem::remove(dump);
 }
+
+TEST(Input, EamDriftSlopeMatchesLammps) {
+  const std::filesystem::path path = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                     "validation" / "lammps_ref" / "cu_u3_nve_drift.txt";
+  std::ifstream in(path);
+  ASSERT_TRUE(in.good());
+  std::string header;
+  std::getline(in, header);
+  std::vector<double> time;
+  std::vector<double> tilemd_energy;
+  std::vector<double> lammps_energy;
+  int step = 0;
+  double sample_time = 0.0;
+  double tilemd_value = 0.0;
+  double lammps_value = 0.0;
+  while (in >> step >> sample_time >> tilemd_value >> lammps_value) {
+    time.push_back(sample_time);
+    tilemd_energy.push_back(tilemd_value);
+    lammps_energy.push_back(lammps_value);
+  }
+  ASSERT_EQ(time.size(), 1001u);
+  EXPECT_EQ(step, 100000);
+  double max_gap = 0.0;
+  double span = 0.0;
+  for (size_t i = 0; i < time.size(); ++i) {
+    max_gap = std::max(max_gap, std::abs(tilemd_energy[i] - lammps_energy[i]));
+    span = std::max(span, std::abs(tilemd_energy[i] - tilemd_energy[0]));
+  }
+  const auto fit = [](const std::vector<double>& xs, const std::vector<double>& ys) {
+    double mean_x = 0.0;
+    double mean_y = 0.0;
+    for (size_t i = 0; i < xs.size(); ++i) {
+      mean_x += xs[i];
+      mean_y += ys[i];
+    }
+    mean_x /= static_cast<double>(xs.size());
+    mean_y /= static_cast<double>(ys.size());
+    double numer = 0.0;
+    double denom = 0.0;
+    for (size_t i = 0; i < xs.size(); ++i) {
+      numer += (xs[i] - mean_x) * (ys[i] - mean_y);
+      denom += (xs[i] - mean_x) * (xs[i] - mean_x);
+    }
+    return numer / denom;
+  };
+  const double tilemd_slope = fit(time, tilemd_energy);
+  const double lammps_slope = fit(time, lammps_energy);
+  EXPECT_LT(max_gap, 1.0e-12);
+  EXPECT_LT(span, 2.0e-6);
+  EXPECT_NEAR(tilemd_slope, -1.93926963e-9, 1.0e-14);
+  EXPECT_NEAR(lammps_slope, tilemd_slope, 1.0e-16);
+}
