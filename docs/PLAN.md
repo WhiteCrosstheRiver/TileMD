@@ -11,7 +11,7 @@
 | Milestone | Branch | State | Gate | PR | Notes |
 |---|---|---|---|---|---|
 | M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. GitHub remote not created (`gh` is not installed). |
-| M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | not started | — | | |
+| M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | in progress | — | | Blocked on this machine: RTX 3050, no H100, no GPUMD binary, LAMMPS has no KOKKOS/GPU package. Not merged. See reports/M1.md. |
 | M2 CPU reference oracle | `m2-cpu-reference` | not started | G1-ref | | |
 | M3 GPU v0 (correct, simple) | `m3-gpu-v0` | not started | G1 | | |
 | M4 Performance foundation | `m4-perf-foundation` | not started | G2, G3 | | |
