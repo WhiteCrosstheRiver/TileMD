@@ -5,7 +5,8 @@
 
 namespace tilemd {
 
-// How many captured graphs and leftover single steps cover one segment.
+// How many K-step graphs cover one segment, and how many steps remain for one
+// tail graph. A zero tail means the segment is an exact multiple of K.
 struct SegmentLaunch {
   int graphs = 0;
   int tail = 0;

@@ -2263,6 +2263,7 @@ void Engine::Run(int steps) {
   }
   // One captured step-group, replayed without a host sync inside the group.
   // Status is read at segment boundaries. graph_unroll is K in PLAN.md, default 50.
+  // A remainder that does not fill K is a second captured graph, not one launch per step.
   // A dump ends the segment early so the frame is the positions at that step.
   constexpr int kSegment = 1000;
   const int unroll = GraphUnroll(impl_->system.graph_unroll, steps);
@@ -2272,14 +2273,22 @@ void Engine::Run(int steps) {
   int done = 0;
   while (done < steps) {
     const int segment = SegmentUntilDump(done, steps - done, dump_every, kSegment);
+    const SegmentLaunch launch = SegmentSteps(segment, unroll);
+    GraphHold tail;
+    auto capture_tail = [&]() {
+      tail.ResetGraph();
+      if (launch.tail > 0) {
+        impl_->Capture(graph.stream, launch.tail, &tail.graph, &tail.exec);
+      }
+    };
+    capture_tail();
     int retries = 0;
     while (true) {
       impl_->Snapshot(graph.stream);
-      const SegmentLaunch launch = SegmentSteps(segment, unroll);
       for (int i = 0; i < launch.graphs; ++i) {
         TILEMD_CHECK(cudaGraphLaunch(graph.exec, graph.stream));
       }
-      for (int i = 0; i < launch.tail; ++i) impl_->LaunchStep(graph.stream);
+      if (launch.tail > 0) TILEMD_CHECK(cudaGraphLaunch(tail.exec, graph.stream));
       TILEMD_CHECK(cudaStreamSynchronize(graph.stream));
       TILEMD_CHECK(cudaGetLastError());
       DeviceStatus finished{};
@@ -2300,6 +2309,7 @@ void Engine::Run(int steps) {
       impl_->ComputeForce();
       graph.ResetGraph();
       impl_->Capture(graph.stream, unroll, &graph.graph, &graph.exec);
+      capture_tail();
     }
     impl_->DrainDeviceThermo();
     done += segment;
