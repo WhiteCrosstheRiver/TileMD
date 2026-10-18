@@ -12,6 +12,11 @@
 
 namespace tilemd {
 
+// True when the farthest atom has moved past half the skin. Equality does not rebuild.
+TILEMD_HD inline bool DisplacementNeedsRebuild(float disp2, float trigger2) {
+  return disp2 > trigger2;
+}
+
 // Shared by the host cluster builder and the device rebuild. The device sort
 // keys z with OrderedZ after wrapping, then groups by column. std::stable_sort
 // on that key matches a stable radix sort.

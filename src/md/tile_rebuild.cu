@@ -61,7 +61,7 @@ __global__ void WriteTileSlots(const double* x, const double* y, const double* z
                                int* slot_type, int* slot_gid, double* lo_x, double* lo_y,
                                double* lo_z, double* hi_x, double* hi_y, double* hi_z, int* live,
                                DeviceStatus* status) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  if (blockIdx.x != 0 || threadIdx.x != 0 || status->need_rebuild == 0) return;
   int sorted_at = 0;
   int cluster_cursor = 0;
   const int ncolumn = nx * ny;
@@ -114,7 +114,8 @@ __global__ void CountTilePairs(const int* column_cluster, const int* column_nclu
                                const double* lo_z, const double* hi_x, const double* hi_y,
                                const double* hi_z, const int* live, int nx, int ny, double reach,
                                double edge_x, double edge_y, double box_x, double box_y,
-                               double box_z, int* pair_count) {
+                               double box_z, int* pair_count, const DeviceStatus* status) {
+  if (status->need_rebuild == 0) return;
   const int ci = blockIdx.x * blockDim.x + threadIdx.x;
   const int ncluster = *live;
   if (ci >= ncluster) return;
@@ -143,7 +144,7 @@ __global__ void CountTilePairs(const int* column_cluster, const int* column_nclu
 
 __global__ void ScanTilePairs(const int* pair_count, const int* live, int pair_cap, int* ci_start,
                               int* live_out, DeviceStatus* status) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  if (blockIdx.x != 0 || threadIdx.x != 0 || status->need_rebuild == 0) return;
   const int ncluster = *live;
   long long total = 0;
   for (int c = 0; c < ncluster; ++c) {
@@ -171,7 +172,9 @@ __global__ void FillTilePairs(const int* column_cluster, const int* column_nclus
                               const double* lo_z, const double* hi_x, const double* hi_y,
                               const double* hi_z, const int* live, const int* ci_start, int nx,
                               int ny, double reach, double edge_x, double edge_y, double box_x,
-                              double box_y, double box_z, int* cj_out, int* shift_out) {
+                              double box_y, double box_z, int* cj_out, int* shift_out,
+                              const DeviceStatus* status) {
+  if (status->need_rebuild == 0) return;
   const int ci = blockIdx.x * blockDim.x + threadIdx.x;
   const int ncluster = *live;
   if (ci >= ncluster) return;
@@ -205,7 +208,7 @@ __global__ void FillTilePairs(const int* column_cluster, const int* column_nclus
 }
 
 __global__ void PublishTileXref(float4* xref, const float4* pos, int n, DeviceStatus* status) {
-  if (status->overflow) return;
+  if (status->need_rebuild == 0 || status->overflow) return;
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) xref[i] = pos[i];
   if (blockIdx.x == 0 && threadIdx.x == 0) status->max_disp2_bits = 0.f;
@@ -248,7 +251,7 @@ bool QueueDeviceTileRebuild(const DeviceTileRebuild& in, cudaStream_t stream) {
   CountTilePairs<<<Grid(in.cluster_cap), kBlock, 0, stream>>>(
       in.column_cluster, in.column_ncluster, in.cluster_column, in.lo_x, in.lo_y, in.lo_z, in.hi_x,
       in.hi_y, in.hi_z, in.live, in.nx, in.ny, in.reach, in.edge_x, in.edge_y, in.box_x, in.box_y,
-      in.box_z, in.pair_count);
+      in.box_z, in.pair_count, in.status);
   // Scan writes the published live count. Pair fill reads that count, so an
   // overflow leaves the next fused step with nothing to walk.
   ScanTilePairs<<<1, 1, 0, stream>>>(in.pair_count, in.live, in.pair_cap, in.ci_start, in.live,
@@ -256,7 +259,7 @@ bool QueueDeviceTileRebuild(const DeviceTileRebuild& in, cudaStream_t stream) {
   FillTilePairs<<<Grid(in.cluster_cap), kBlock, 0, stream>>>(
       in.column_cluster, in.column_ncluster, in.cluster_column, in.lo_x, in.lo_y, in.lo_z, in.hi_x,
       in.hi_y, in.hi_z, in.live, in.ci_start, in.nx, in.ny, in.reach, in.edge_x, in.edge_y,
-      in.box_x, in.box_y, in.box_z, in.cj, in.shift);
+      in.box_x, in.box_y, in.box_z, in.cj, in.shift, in.status);
   PublishTileXref<<<Grid(in.n), kBlock, 0, stream>>>(in.xref, in.pos, in.n, in.status);
   return cudaGetLastError() == cudaSuccess;
 }
@@ -331,7 +334,9 @@ HostClusterList RebuildClusterListOnDevice(const double* box, const double* x, c
       cudaMemcpy(const_cast<double*>(in.z), z, sizeof(double) * n, cudaMemcpyHostToDevice));
   TILEMD_REBUILD_CHECK(
       cudaMemcpy(const_cast<int*>(in.type), type, sizeof(int) * n, cudaMemcpyHostToDevice));
-  TILEMD_REBUILD_CHECK(cudaMemset(in.status, 0, sizeof(DeviceStatus)));
+  DeviceStatus primed{};
+  primed.need_rebuild = 1;
+  TILEMD_REBUILD_CHECK(cudaMemcpy(in.status, &primed, sizeof(primed), cudaMemcpyHostToDevice));
   TILEMD_REBUILD_CHECK(cudaMemset(in.live, 0, sizeof(int)));
   if (!QueueDeviceTileRebuild(in, nullptr)) {
     throw std::runtime_error("device cluster rebuild failed");

@@ -21,6 +21,7 @@
 #include "md/tile_rebuild.hpp"
 #include "md/tile_thermo.hpp"
 #include "neighbor/cluster_list.hpp"
+#include "neighbor/cluster_order.hpp"
 
 namespace tilemd {
 
@@ -594,7 +595,7 @@ __global__ void ResetDisplacement(DeviceStatus* status) {
 __global__ void DecideRebuild(DeviceStatus* status) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
   float d2 = status->max_disp2_bits;
-  status->need_rebuild = (c_rebuild_every || d2 > c_trigger2) ? 1 : 0;
+  status->need_rebuild = (c_rebuild_every || DisplacementNeedsRebuild(d2, c_trigger2)) ? 1 : 0;
 }
 
 __global__ void ZeroMaxNn(int* max_nn, const int* gate) {
@@ -1820,6 +1821,7 @@ bool Engine::Impl::CaptureFusedGraph(cudaStream_t stream, int count, float4* cur
     FinishTileThermoDevice<<<1, 1, 0, stream>>>(tile_partial, tile_cluster_cap, thermo_ring,
                                                 kThermoRing, thermo_count, tile_record, tile_live,
                                                 status);
+    DecideRebuild<<<1, 1, 0, stream>>>(status);
     if (!QueueTileRebuildStep(stream, write)) ok = false;
     std::swap(read, write);
   }

@@ -77,6 +77,13 @@ void ExpectDeviceOrder(const double* box, const double* x, const double* y, cons
 
 }  // namespace
 
+TEST(ClusterList, HalfSkinIsTheRebuildLine) {
+  EXPECT_FALSE(tilemd::DisplacementNeedsRebuild(0.0225f, 0.0225f));
+  EXPECT_FALSE(tilemd::DisplacementNeedsRebuild(0.0f, 0.0225f));
+  EXPECT_TRUE(tilemd::DisplacementNeedsRebuild(0.0226f, 0.0225f));
+  EXPECT_TRUE(tilemd::DisplacementNeedsRebuild(0.1f, 0.0f));
+}
+
 TEST(ClusterList, DeviceSortKeyMatchesTheHostGrid) {
   const double box[3] = {10.0, 10.0, 10.0};
   const int type3[3] = {0, 1, 2};
