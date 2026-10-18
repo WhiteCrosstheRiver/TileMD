@@ -33,7 +33,9 @@ int Grid(int n) { return std::max(1, (n + kBlock - 1) / kBlock); }
 __global__ void CountTileColumns(const double* x, const double* y, const double* z, int n, int nx,
                                  int ny, double edge_x, double edge_y, double box_x, double box_y,
                                  double box_z, int* column_count, int* column_of,
-                                 unsigned long long* zkey, int* order_in) {
+                                 unsigned long long* zkey, int* order_in,
+                                 const DeviceStatus* status) {
+  if (status->need_rebuild == 0) return;
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   const double wx = WrapCoord(x[i], box_x);
@@ -48,7 +50,9 @@ __global__ void CountTileColumns(const double* x, const double* y, const double*
   order_in[i] = i;
 }
 
-__global__ void GatherColumnKey(const int* column_of, const int* order_z, int* colkey, int n) {
+__global__ void GatherColumnKey(const int* column_of, const int* order_z, int* colkey, int n,
+                                const DeviceStatus* status) {
+  if (status->need_rebuild == 0) return;
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   colkey[i] = column_of[order_z[i]];
@@ -229,14 +233,15 @@ bool QueueDeviceTileRebuild(const DeviceTileRebuild& in, cudaStream_t stream) {
   }
   CountTileColumns<<<Grid(in.n), kBlock, 0, stream>>>(
       in.x, in.y, in.z, in.n, in.nx, in.ny, in.edge_x, in.edge_y, in.box_x, in.box_y, in.box_z,
-      in.column_count, in.column_of, in.zkey, in.order_in);
+      in.column_count, in.column_of, in.zkey, in.order_in, in.status);
   size_t sort_bytes = in.cub_bytes;
   if (cub::DeviceRadixSort::SortPairs(
           in.cub_temp, sort_bytes, in.zkey, in.zkey_out, in.order_in, in.order_z, in.n, 0,
           static_cast<int>(sizeof(unsigned long long) * 8), stream) != cudaSuccess) {
     return false;
   }
-  GatherColumnKey<<<Grid(in.n), kBlock, 0, stream>>>(in.column_of, in.order_z, in.colkey, in.n);
+  GatherColumnKey<<<Grid(in.n), kBlock, 0, stream>>>(in.column_of, in.order_z, in.colkey, in.n,
+                                                     in.status);
   sort_bytes = in.cub_bytes;
   if (cub::DeviceRadixSort::SortPairs(in.cub_temp, sort_bytes, in.colkey, in.colkey_out, in.order_z,
                                       in.order_out, in.n, 0, static_cast<int>(sizeof(int) * 8),
