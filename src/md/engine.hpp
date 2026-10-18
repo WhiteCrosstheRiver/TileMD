@@ -25,6 +25,9 @@ struct HostSystem {
   // 0 selects the density estimate from PLAN.md section 5.3.
   int max_neigh = 0;
   bool rebuild_every_step = true;
+  // Atom-neighbor `Run` captures this many steps in one CUDA graph. The fused
+  // tile path still launches one step at a time.
+  int graph_unroll = 50;
   // 0 keeps energy and virial off the step path. Otherwise the device writes a
   // thermo record when the completed step is a multiple of this interval.
   int thermo_every = 0;

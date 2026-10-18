@@ -8,11 +8,13 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "force/eam.hpp"
 #include "io/run.hpp"
+#include "md/run_plan.hpp"
 
 namespace {
 
@@ -66,6 +68,20 @@ TEST(Input, FccMeltMatchesTheSketch) {
   }
   EXPECT_TRUE(std::isfinite(state.x[0]));
   EXPECT_GT(std::abs(state.vx[0]) + std::abs(state.vy[0]) + std::abs(state.vz[0]), 0.0);
+}
+
+TEST(Input, GraphUnrollSetsTheCapturedGroup) {
+  EXPECT_EQ(tilemd::GraphUnroll(50, 1000), 50);
+  EXPECT_EQ(tilemd::GraphUnroll(50, 20), 20);
+  EXPECT_EQ(tilemd::GraphUnroll(1, 5), 1);
+  EXPECT_THROW(tilemd::GraphUnroll(0, 10), std::invalid_argument);
+  const tilemd::SegmentLaunch exact = tilemd::SegmentSteps(1000, 50);
+  EXPECT_EQ(exact.graphs, 20);
+  EXPECT_EQ(exact.tail, 0);
+  const tilemd::SegmentLaunch remainder = tilemd::SegmentSteps(1000, 30);
+  EXPECT_EQ(remainder.graphs, 33);
+  EXPECT_EQ(remainder.tail, 10);
+  EXPECT_THROW(tilemd::SegmentSteps(10, 0), std::invalid_argument);
 }
 
 TEST(Input, VelocitiesRepeatForTheSameSeed) {

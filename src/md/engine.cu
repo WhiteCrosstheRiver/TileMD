@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "core/device_status.hpp"
+#include "md/run_plan.hpp"
 #include "md/tile_force.hpp"
 #include "md/tile_thermo.hpp"
 #include "neighbor/cluster_list.hpp"
@@ -1726,10 +1727,9 @@ void Engine::Run(int steps) {
     return;
   }
   // One captured step-group, replayed without a host sync inside the group.
-  // Status is read at segment boundaries. 50 is the default unroll in PLAN.md.
-  constexpr int kUnroll = 50;
+  // Status is read at segment boundaries. graph_unroll is K in PLAN.md, default 50.
   constexpr int kSegment = 1000;
-  const int unroll = std::min(kUnroll, steps);
+  const int unroll = GraphUnroll(impl_->system.graph_unroll, steps);
   GraphHold graph;
   TILEMD_CHECK(cudaStreamCreate(&graph.stream));
   impl_->Capture(graph.stream, unroll, &graph.graph, &graph.exec);
@@ -1739,10 +1739,11 @@ void Engine::Run(int steps) {
     int retries = 0;
     while (true) {
       impl_->Snapshot(graph.stream);
-      const int full = segment / unroll;
-      const int tail = segment % unroll;
-      for (int i = 0; i < full; ++i) TILEMD_CHECK(cudaGraphLaunch(graph.exec, graph.stream));
-      for (int i = 0; i < tail; ++i) impl_->LaunchStep(graph.stream);
+      const SegmentLaunch launch = SegmentSteps(segment, unroll);
+      for (int i = 0; i < launch.graphs; ++i) {
+        TILEMD_CHECK(cudaGraphLaunch(graph.exec, graph.stream));
+      }
+      for (int i = 0; i < launch.tail; ++i) impl_->LaunchStep(graph.stream);
       TILEMD_CHECK(cudaStreamSynchronize(graph.stream));
       TILEMD_CHECK(cudaGetLastError());
       DeviceStatus finished{};

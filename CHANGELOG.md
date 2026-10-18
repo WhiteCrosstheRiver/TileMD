@@ -26,6 +26,7 @@
 - M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded, and this kernel has not been launched.
 - M6 `pos4` coordinate rounding. On `melt_4000` it moves the force by `5.81e-5` relative to the double-precision oracle, outside the `1e-5` tolerance. One hundred leapfrog steps on the 40-atom box move positions by at most `5.69e-8`.
 - M6 fused-step traffic on the 32k melt. Distinct global addresses in one step are 2163 bytes per atom, above the 60–110 byte target, because each kept cluster reloads `pos4`. This is a source count, not an Nsight measurement.
+- M4 captured group length. `graph_unroll` selects how many atom-neighbor steps go into one CUDA graph. The default 50 divides a 1000-step segment evenly; 30 leaves a 10-step tail. The fused tile path still launches one step at a time.
 - M6 fused thermo. A thermo step reduces potential, virial, and integer-time kinetic energy once per cluster. The final step is recorded by one extra force evaluation. Eight steps with interval 2 record times 0, 2, 4, 6, and 8, matching velocity Verlet on the CPU. The device path has not been launched.
 - M7 CPU prototype of the TF32 and 3×TF32 pair score. It is not on the default force path. On the 4000-atom melt the 3×TF32 force error is outside the 1e-5 tolerance.
 - M7 compact-cell remeasure of that score. A cell of about 4 atoms lowers the melt force error from 7.9e-5 to 1.9e-5, which is still outside the tolerance.
