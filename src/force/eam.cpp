@@ -1,9 +1,10 @@
 #include "force/eam.hpp"
 
-#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+
+#include "force/eam_eval.hpp"
 
 namespace tilemd {
 namespace {
@@ -44,19 +45,6 @@ void BuildKnots(int n, double delta, const double* values, EamKnot* spline) {
     spline[m].c[1] = 2.0 * spline[m].c[4] / delta;
     spline[m].c[0] = 3.0 * spline[m].c[3] / delta;
   }
-}
-
-void SampleKnots(const EamKnot* spline, int n, double x, double inv_dx, int m_floor, double* value,
-                 double* derivative) {
-  double p = x * inv_dx + 1.0;
-  int m = static_cast<int>(p);
-  if (m < m_floor) m = m_floor;
-  if (m > n - 1) m = n - 1;
-  p -= static_cast<double>(m);
-  if (p > 1.0) p = 1.0;
-  const double* c = spline[m].c;
-  *derivative = (c[0] * p + c[1]) * p + c[2];
-  *value = ((c[3] * p + c[4]) * p + c[5]) * p + c[6];
 }
 
 std::string NextContentLine(std::istream& in) {
@@ -142,36 +130,13 @@ void EamFuncfl::Sample(const EamKnot* spline, int n, double x, double inv_dx, in
 }
 
 PairOutput EamFuncfl::PairScalar(int pass, double r2, int, int, int i, int j) {
-  if (!(r2 < cut2_) || !(r2 > 0.0)) return {};
-  const double r = std::sqrt(r2);
-  double z2 = 0.0;
-  double z2p = 0.0;
-  double rho = 0.0;
-  double rhop = 0.0;
-  Sample(rhor_.data(), nr_, r, rdr_, 1, &rho, &rhop);
-  if (pass == 0) {
-    PairOutput out;
-    out.value = rho;
-    return out;
-  }
-  Sample(z2r_.data(), nr_, r, rdr_, 1, &z2, &z2p);
-  const double recip = 1.0 / r;
-  const double phi = z2 * recip;
-  const double phip = z2p * recip - phi * recip;
-  const double psip =
-      fp_[static_cast<size_t>(i)] * rhop + fp_[static_cast<size_t>(j)] * rhop + phip;
-  PairOutput out;
-  out.force = -psip * recip;
-  out.energy = phi;
-  return out;
+  return EamFuncflPair(rhor_.data(), z2r_.data(), fp_.data(), nr_, rdr_, cut2_, pass, r2, i, j);
 }
 
 double EamFuncfl::AtomUpdate(int pass, int i, double value) {
   if (pass != 0) return 0.0;
-  double embedding = 0.0;
   double derivative = 0.0;
-  Sample(frho_.data(), nrho_, value, rdrho_, 1, &embedding, &derivative);
-  if (value > rhomax_) embedding += derivative * (value - rhomax_);
+  const double embedding = EamEmbed(frho_.data(), nrho_, rdrho_, rhomax_, value, &derivative);
   fp_[static_cast<size_t>(i)] = derivative;
   return embedding;
 }
@@ -286,42 +251,18 @@ int EamSetfl::PairIndex(int type_i, int type_j) const {
 }
 
 PairOutput EamSetfl::PairScalar(int pass, double r2, int type_i, int type_j, int i, int j) {
-  if (!(r2 < cut2_) || !(r2 > 0.0)) return {};
-  const double r = std::sqrt(r2);
-  double rho_j = 0.0;
-  double rhop_j = 0.0;
-  SampleKnots(rhor_[static_cast<size_t>(type_j)].data(), nr_, r, rdr_, 1, &rho_j, &rhop_j);
-  if (pass == 0) {
-    PairOutput out;
-    out.value = rho_j;
-    return out;
-  }
-  double rho_i = 0.0;
-  double rhop_i = 0.0;
-  SampleKnots(rhor_[static_cast<size_t>(type_i)].data(), nr_, r, rdr_, 1, &rho_i, &rhop_i);
-  double z2 = 0.0;
-  double z2p = 0.0;
-  const int pair = PairIndex(type_i, type_j);
-  SampleKnots(z2r_[static_cast<size_t>(pair)].data(), nr_, r, rdr_, 1, &z2, &z2p);
-  const double recip = 1.0 / r;
-  const double phi = z2 * recip;
-  const double phip = z2p * recip - phi * recip;
-  const double psip =
-      fp_[static_cast<size_t>(i)] * rhop_j + fp_[static_cast<size_t>(j)] * rhop_i + phip;
-  PairOutput out;
-  out.force = -psip * recip;
-  out.energy = phi;
-  return out;
+  return EamSetflPair(rhor_[static_cast<size_t>(type_j)].data(),
+                      rhor_[static_cast<size_t>(type_i)].data(),
+                      z2r_[static_cast<size_t>(PairIndex(type_i, type_j))].data(), fp_.data(), nr_,
+                      rdr_, cut2_, pass, r2, i, j);
 }
 
 double EamSetfl::AtomUpdate(int pass, int i, double value) {
   if (pass != 0) return 0.0;
   const int element = type_[static_cast<size_t>(i)];
-  double embedding = 0.0;
   double derivative = 0.0;
-  SampleKnots(frho_[static_cast<size_t>(element)].data(), nrho_, value, rdrho_, 1, &embedding,
-              &derivative);
-  if (value > rhomax_) embedding += derivative * (value - rhomax_);
+  const double embedding = EamEmbed(frho_[static_cast<size_t>(element)].data(), nrho_, rdrho_,
+                                    rhomax_, value, &derivative);
   fp_[static_cast<size_t>(i)] = derivative;
   return embedding;
 }

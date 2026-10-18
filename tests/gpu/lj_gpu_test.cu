@@ -14,7 +14,9 @@
 #include <string>
 #include <vector>
 
+#include "force/eam_attention.hpp"
 #include "force/lj_attention.hpp"
+#include "force/tile_attention.hpp"
 #include "lj_reference.hpp"
 #include "md/engine.hpp"
 #include "md/tile_rebuild.hpp"
@@ -542,4 +544,108 @@ TEST(GpuLj, DeviceClusterRebuildMatchesTheHostList) {
   EXPECT_EQ(device.ci_start, host_pairs.ci_start);
   EXPECT_EQ(device.cj, host_pairs.cj);
   EXPECT_EQ(device.shift, host_pairs.shift);
+}
+
+double RelativeForce(const std::vector<double>& fx, const std::vector<double>& fy,
+                     const std::vector<double>& fz, const std::vector<double>& gx,
+                     const std::vector<double>& gy, const std::vector<double>& gz) {
+  const int n = static_cast<int>(gx.size());
+  double max_delta = 0.0;
+  double sum_sq = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const double dx = fx[static_cast<size_t>(i)] - gx[static_cast<size_t>(i)];
+    const double dy = fy[static_cast<size_t>(i)] - gy[static_cast<size_t>(i)];
+    const double dz = fz[static_cast<size_t>(i)] - gz[static_cast<size_t>(i)];
+    max_delta = std::max(max_delta, std::sqrt(dx * dx + dy * dy + dz * dz));
+    sum_sq += gx[static_cast<size_t>(i)] * gx[static_cast<size_t>(i)] +
+              gy[static_cast<size_t>(i)] * gy[static_cast<size_t>(i)] +
+              gz[static_cast<size_t>(i)] * gz[static_cast<size_t>(i)];
+  }
+  const double rms = std::sqrt(sum_sq / static_cast<double>(std::max(n, 1)));
+  return max_delta / std::max(rms, 1.0e-30);
+}
+
+TEST(GpuLj, EamFuncflKernelMatchesTheLaneWalk) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const std::filesystem::path table =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "Cu_u3.eam";
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cu_u3_108.txt";
+  if (!std::filesystem::exists(table) || !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "Cu EAM reference has not been generated";
+  }
+  std::ifstream in(ref);
+  int n = 0;
+  double box[3];
+  double energy = 0.0;
+  in >> n >> box[0] >> box[1] >> box[2] >> energy;
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  std::vector<int> type(static_cast<size_t>(n), 0);
+  for (int i = 0; i < n; ++i) {
+    double fx = 0.0;
+    double fy = 0.0;
+    double fz = 0.0;
+    in >> x[static_cast<size_t>(i)] >> y[static_cast<size_t>(i)] >> z[static_cast<size_t>(i)] >>
+        fx >> fy >> fz;
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  tilemd::EamFuncfl lanes(table.string());
+  tilemd::EamFuncfl device_potential(table.string());
+  const tilemd::AttentionResult host =
+      tilemd::WarpLaneAttention(lanes, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const tilemd::AttentionResult got = tilemd::RunEamFuncflGpu(
+      device_potential, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const double error = RelativeForce(got.fx, got.fy, got.fz, host.fx, host.fy, host.fz);
+  EXPECT_LT(error, 1.0e-9);
+  EXPECT_NEAR(got.potential_energy, host.potential_energy,
+              1.0e-9 * (1.0 + std::abs(host.potential_energy)));
+}
+
+TEST(GpuLj, EamSetflKernelMatchesTheLaneWalk) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const std::filesystem::path bundled =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "CuNi.eam.alloy";
+  const std::filesystem::path installed(
+      "C:/ProgramData/anaconda3/Lib/site-packages/lammps/share/lammps/potentials/CuNi.eam.alloy");
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cuni_setfl_4.txt";
+  std::string table;
+  if (std::filesystem::exists(bundled))
+    table = bundled.string();
+  else if (std::filesystem::exists(installed))
+    table = installed.string();
+  if (table.empty() || !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "CuNi setfl table is not available";
+  }
+  std::ifstream in(ref);
+  int n = 0;
+  double box[3];
+  double energy = 0.0;
+  in >> n >> box[0] >> box[1] >> box[2] >> energy;
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  std::vector<int> type(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    in >> type[static_cast<size_t>(i)] >> x[static_cast<size_t>(i)] >> y[static_cast<size_t>(i)] >>
+        z[static_cast<size_t>(i)];
+    double fx = 0.0;
+    double fy = 0.0;
+    double fz = 0.0;
+    in >> fx >> fy >> fz;
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  tilemd::EamSetfl lanes(table);
+  tilemd::EamSetfl device_potential(table);
+  lanes.SetAtoms(type.data(), n);
+  const tilemd::AttentionResult host =
+      tilemd::WarpLaneAttention(lanes, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const tilemd::AttentionResult got = tilemd::RunEamSetflGpu(
+      device_potential, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const double error = RelativeForce(got.fx, got.fy, got.fz, host.fx, host.fy, host.fz);
+  EXPECT_LT(error, 1.0e-9);
+  EXPECT_NEAR(got.potential_energy, host.potential_energy,
+              1.0e-9 * (1.0 + std::abs(host.potential_energy)));
 }

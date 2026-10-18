@@ -31,6 +31,14 @@ class EamFuncfl {
 
   double Cutoff() const { return cut_; }
   double Mass() const { return mass_; }
+  const EamKnot* DensityKnots() const { return rhor_.data(); }
+  const EamKnot* Z2Knots() const { return z2r_.data(); }
+  const EamKnot* EmbeddingKnots() const { return frho_.data(); }
+  int KnotCountR() const { return nr_; }
+  int KnotCountRho() const { return nrho_; }
+  double InvDr() const { return rdr_; }
+  double InvDrho() const { return rdrho_; }
+  double RhoMax() const { return rhomax_; }
   void Prepare(int n);
 
   PairOutput PairScalar(int pass, double r2, int type_i, int type_j, int i, int j);
@@ -70,6 +78,19 @@ class EamSetfl {
 
   double Cutoff() const { return cut_; }
   int NumElements() const { return static_cast<int>(elements_.size()); }
+  const EamKnot* DensityKnots(int element) const {
+    return rhor_.at(static_cast<size_t>(element)).data();
+  }
+  const EamKnot* EmbeddingKnots(int element) const {
+    return frho_.at(static_cast<size_t>(element)).data();
+  }
+  const EamKnot* Z2Knots(int pair) const { return z2r_.at(static_cast<size_t>(pair)).data(); }
+  int PairTableCount() const { return static_cast<int>(z2r_.size()); }
+  int KnotCountR() const { return nr_; }
+  int KnotCountRho() const { return nrho_; }
+  double InvDr() const { return rdr_; }
+  double InvDrho() const { return rdrho_; }
+  double RhoMax() const { return rhomax_; }
   const std::string& Element(int index) const { return elements_.at(static_cast<size_t>(index)); }
   double Mass(int index) const { return mass_.at(static_cast<size_t>(index)); }
   void SetAtoms(const int* type, int n);
