@@ -576,18 +576,8 @@ void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, con
   if (missing_host) throw std::invalid_argument("missing pair coefficient");
 }
 
-void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const int* ci_start,
-                           const int* cj, const int* image, int* missing, const double* box,
-                           const LjPair* pairs, int npair, LjShift lj_shift, double* atom_x,
-                           double* atom_y, double* atom_z, double* vx, double* vy, double* vz,
-                           int* imgx, int* imgy, int* imgz, float4* pos_cur, float4* pos_next,
-                           float4* xref, void* status, int* step_counter, double dt,
-                           double inv_mass, TileThermoPartial* partial, int record_step) {
+void UploadFusedTileSymbols(const double* box, const LjPair* pairs, int npair, LjShift lj_shift) {
   if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
-  if (!(dt > 0.0) || !(inv_mass > 0.0)) {
-    throw std::invalid_argument("dt and inverse mass must be positive");
-  }
-  if (ncluster <= 0) return;
   TileRow rows[kTileTypes * kTileTypes] = {};
   for (int p = 0; p < npair; ++p) {
     const LjPair& coeff = pairs[p];
@@ -620,8 +610,19 @@ void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const 
   Check(cudaMemcpyToSymbol(c_tile_rows, rows, sizeof(rows)));
   Check(cudaMemcpyToSymbol(c_tile_box, box, sizeof(double) * 3));
   Check(cudaMemcpyToSymbol(c_tile_shift, &shift_code, sizeof(shift_code)));
-  Check(cudaMemset(missing, 0, sizeof(int)));
+}
 
+void LaunchFusedTileKernel(int ncluster, const int* type, const int* gid, const int* ci_start,
+                           const int* cj, const int* image, int* missing, double* atom_x,
+                           double* atom_y, double* atom_z, double* vx, double* vy, double* vz,
+                           int* imgx, int* imgy, int* imgz, float4* pos_cur, float4* pos_next,
+                           float4* xref, void* status, int* step_counter, double dt,
+                           double inv_mass, TileThermoPartial* partial, int record_step,
+                           cudaStream_t stream) {
+  if (!(dt > 0.0) || !(inv_mass > 0.0)) {
+    throw std::invalid_argument("dt and inverse mass must be positive");
+  }
+  if (ncluster <= 0) return;
   TileIntegrate step;
   step.x = atom_x;
   step.y = atom_y;
@@ -641,10 +642,24 @@ void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const 
   step.inv_mass = inv_mass;
   step.partial = partial;
   step.record_step = record_step;
-  TileForceKernel<true><<<ncluster, 32>>>(
+  TileForceKernel<true><<<ncluster, 32, 0, stream>>>(
       nullptr, nullptr, nullptr, type, gid, ci_start, cj, image, nullptr, nullptr, nullptr, nullptr,
       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, ncluster, missing, step);
   Check(cudaGetLastError());
+}
+
+void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const int* ci_start,
+                           const int* cj, const int* image, int* missing, const double* box,
+                           const LjPair* pairs, int npair, LjShift lj_shift, double* atom_x,
+                           double* atom_y, double* atom_z, double* vx, double* vy, double* vz,
+                           int* imgx, int* imgy, int* imgz, float4* pos_cur, float4* pos_next,
+                           float4* xref, void* status, int* step_counter, double dt,
+                           double inv_mass, TileThermoPartial* partial, int record_step) {
+  UploadFusedTileSymbols(box, pairs, npair, lj_shift);
+  Check(cudaMemset(missing, 0, sizeof(int)));
+  LaunchFusedTileKernel(ncluster, type, gid, ci_start, cj, image, missing, atom_x, atom_y, atom_z,
+                        vx, vy, vz, imgx, imgy, imgz, pos_cur, pos_next, xref, status, step_counter,
+                        dt, inv_mass, partial, record_step, nullptr);
   Check(cudaDeviceSynchronize());
   int missing_host = 0;
   Check(cudaMemcpy(&missing_host, missing, sizeof(int), cudaMemcpyDeviceToHost));

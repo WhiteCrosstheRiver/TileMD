@@ -82,6 +82,13 @@ TEST(Input, GraphUnrollSetsTheCapturedGroup) {
   EXPECT_EQ(remainder.graphs, 33);
   EXPECT_EQ(remainder.tail, 10);
   EXPECT_THROW(tilemd::SegmentSteps(10, 0), std::invalid_argument);
+  EXPECT_FALSE(tilemd::FusedGraphOk(true, 0));
+  EXPECT_FALSE(tilemd::FusedGraphOk(false, 10));
+  EXPECT_TRUE(tilemd::FusedGraphOk(false, 0));
+  EXPECT_EQ(tilemd::FusedLatestBuffer(0), 0);
+  EXPECT_EQ(tilemd::FusedLatestBuffer(1), 1);
+  EXPECT_EQ(tilemd::FusedLatestBuffer(8), 0);
+  EXPECT_THROW(tilemd::FusedLatestBuffer(-1), std::invalid_argument);
 }
 
 TEST(Input, VelocitiesRepeatForTheSameSeed) {

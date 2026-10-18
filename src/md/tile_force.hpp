@@ -47,6 +47,18 @@ void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, con
 // `record_step < 0` skips energy, virial, and the partial write. Otherwise that
 // step index is the integer time of the positions the force was computed from,
 // and each cluster writes one partial.
+// Pair rows and the box. Called before a captured graph; the kernel itself
+// does not copy them and does not synchronize.
+void UploadFusedTileSymbols(const double* box, const LjPair* pairs, int npair, LjShift shift);
+
+// One fused kernel on `stream`. Symbols must already be uploaded. No host sync.
+void LaunchFusedTileKernel(int ncluster, const int* type, const int* gid, const int* ci_start,
+                           const int* cj, const int* image, int* missing, double* x, double* y,
+                           double* z, double* vx, double* vy, double* vz, int* imgx, int* imgy,
+                           int* imgz, float4* pos_cur, float4* pos_next, float4* xref, void* status,
+                           int* step_counter, double dt, double inv_mass,
+                           TileThermoPartial* partial, int record_step, cudaStream_t stream);
+
 void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const int* ci_start,
                            const int* cj, const int* image, int* missing, const double* box,
                            const LjPair* pairs, int npair, LjShift shift, double* x, double* y,

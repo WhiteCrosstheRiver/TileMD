@@ -736,6 +736,9 @@ struct Engine::Impl {
   bool TileListStale();
   void RebuildTileCache(float4* pos_cur);
   void LaunchTileStep(float4* pos_cur, float4* pos_out);
+  void RunTileSteps(int count, float4*& latest, float4*& other);
+  bool CaptureFusedGraph(cudaStream_t stream, int count, float4* cur, float4* nxt,
+                         cudaGraph_t* graph, cudaGraphExec_t* exec);
   void RecordClosingTileThermo();
   void RunClusterTiles(int steps);
   GpuForces DownloadForces(int overflow);
@@ -1559,6 +1562,40 @@ void Engine::Impl::RecordClosingTileThermo() {
   drained.push_back(sample);
 }
 
+void Engine::Impl::RunTileSteps(int count, float4*& latest, float4*& other) {
+  for (int step = 0; step < count; ++step) {
+    if (TileListStale()) RebuildTileCache(latest);
+    LaunchTileStep(latest, other);
+    std::swap(latest, other);
+  }
+}
+
+bool Engine::Impl::CaptureFusedGraph(cudaStream_t stream, int count, float4* cur, float4* nxt,
+                                     cudaGraph_t* graph, cudaGraphExec_t* exec) {
+  if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) return false;
+  bool ok = cudaMemsetAsync(tile_missing, 0, sizeof(int), stream) == cudaSuccess;
+  float4* read = cur;
+  float4* write = nxt;
+  for (int step = 0; step < count && ok; ++step) {
+    LaunchFusedTileKernel(tile_ncluster, tile_type, tile_gid, tile_ci, tile_cj, tile_shift,
+                          tile_missing, x, y, z, vx, vy, vz, imgx, imgy, imgz, read, write, xref,
+                          status, step_counter, system.dt, 1.0 / system.mass, nullptr, -1, stream);
+    std::swap(read, write);
+  }
+  cudaGraph_t built = nullptr;
+  const cudaError_t end = cudaStreamEndCapture(stream, &built);
+  if (!ok || end != cudaSuccess) {
+    if (built) cudaGraphDestroy(built);
+    return false;
+  }
+  if (cudaGraphInstantiate(exec, built, 0) != cudaSuccess) {
+    cudaGraphDestroy(built);
+    return false;
+  }
+  *graph = built;
+  return true;
+}
+
 void Engine::Impl::RunClusterTiles(int steps) {
   Upload();
   if (!leapfrog_ready) {
@@ -1577,10 +1614,65 @@ void Engine::Impl::RunClusterTiles(int steps) {
   }
   float4* latest = pos;
   float4* other = pos_next;
-  for (int step = 0; step < steps; ++step) {
-    if (TileListStale()) RebuildTileCache(latest);
-    LaunchTileStep(latest, other);
-    std::swap(latest, other);
+  if (!FusedGraphOk(system.rebuild_every_step, system.thermo_every)) {
+    RunTileSteps(steps, latest, other);
+  } else {
+    int done = 0;
+    while (done < steps) {
+      const int unroll = GraphUnroll(system.graph_unroll, steps - done);
+      if (TileListStale()) RebuildTileCache(latest);
+      const int saved_step = tile_step;
+      GraphHold graph;
+      TILEMD_CHECK(cudaStreamCreate(&graph.stream));
+      Snapshot(graph.stream);
+      TILEMD_CHECK(cudaStreamSynchronize(graph.stream));
+      std::vector<LjPair> coeffs;
+      coeffs.reserve(system.pairs.size());
+      for (const PairSpec& spec : system.pairs) {
+        LjPair row;
+        row.type_i = spec.type_i;
+        row.type_j = spec.type_j;
+        row.epsilon = spec.epsilon;
+        row.sigma = spec.sigma;
+        row.cutoff = spec.cutoff;
+        coeffs.push_back(row);
+      }
+      LjShift lj_shift = LjShift::None;
+      if (system.shift == Shift::Energy) lj_shift = LjShift::Energy;
+      if (system.shift == Shift::Force) lj_shift = LjShift::Force;
+      UploadFusedTileSymbols(system.box, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift);
+      const bool captured =
+          CaptureFusedGraph(graph.stream, unroll, latest, other, &graph.graph, &graph.exec);
+      if (!captured || tile_ncluster <= 0) {
+        RunTileSteps(unroll, latest, other);
+      } else {
+        TILEMD_CHECK(cudaGraphLaunch(graph.exec, graph.stream));
+        TILEMD_CHECK(cudaStreamSynchronize(graph.stream));
+        TILEMD_CHECK(cudaGetLastError());
+        tile_step += unroll;
+        if (unroll % 2 == 1) std::swap(latest, other);
+        int missing_host = 0;
+        TILEMD_CHECK(cudaMemcpy(&missing_host, tile_missing, sizeof(int), cudaMemcpyDeviceToHost));
+        if (missing_host) throw std::invalid_argument("missing pair coefficient");
+        DeviceStatus finished{};
+        TILEMD_CHECK(cudaMemcpy(&finished, status, sizeof(finished), cudaMemcpyDeviceToHost));
+        if (finished.nan_detected) {
+          throw std::runtime_error("non-finite force or position during integration at step " +
+                                   std::to_string(done));
+        }
+        if (TileListStale()) {
+          RestoreSnapshot();
+          if (n > 0) {
+            TILEMD_CHECK(cudaMemcpy(pos_next, pos, sizeof(float4) * n, cudaMemcpyDeviceToDevice));
+          }
+          tile_step = saved_step;
+          latest = pos;
+          other = pos_next;
+          RunTileSteps(unroll, latest, other);
+        }
+      }
+      done += unroll;
+    }
   }
   if (latest != pos) std::swap(pos, pos_next);
   RecordClosingTileThermo();

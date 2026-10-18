@@ -19,6 +19,20 @@ inline int GraphUnroll(int requested, int steps) {
   return std::min(requested, steps);
 }
 
+// A captured fused graph replays one cluster list. Thermo is chosen on the
+// host, so an interval keeps the step-by-step loop. Rebuilding every step
+// does too: the list is built on the host.
+inline bool FusedGraphOk(bool rebuild_every_step, int thermo_every) {
+  return !rebuild_every_step && thermo_every <= 0;
+}
+
+// Buffer that holds the latest positions after `steps` fused launches, when
+// launch 0 reads buffer 0 and writes buffer 1.
+inline int FusedLatestBuffer(int steps) {
+  if (steps < 0) throw std::invalid_argument("step count must be non-negative");
+  return steps % 2;
+}
+
 inline SegmentLaunch SegmentSteps(int segment, int unroll) {
   if (unroll < 1) throw std::invalid_argument("graph_unroll must be positive");
   if (segment < 0) throw std::invalid_argument("segment length must be non-negative");
