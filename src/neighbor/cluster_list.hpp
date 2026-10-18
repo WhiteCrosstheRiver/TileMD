@@ -104,4 +104,14 @@ TileForces ComputeTileForces(const double* box, const double* x, const double* y
                              const int* type, int n, const LjPair* pairs, int npair, double skin,
                              LjShift shift, int nx = 0, int ny = 0);
 
+// Same pair walk on a list built earlier. `x`, `y`, and `z` are the current
+// wrapped coordinates. `xref`, `yref`, and `zref` are those coordinates at the
+// rebuild. A coordinate that has wrapped since then is put back on the
+// continuous trajectory before the stored image shift is applied. Passing the
+// current coordinates as the reference leaves the shift unchanged.
+TileForces ComputeTileForcesOnList(const ClusterGrid& grid, const ClusterPairs& list,
+                                   const double* x, const double* y, const double* z,
+                                   const double* xref, const double* yref, const double* zref,
+                                   const LjPair* pairs, int npair, LjShift shift);
+
 }  // namespace tilemd

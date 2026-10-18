@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -476,4 +477,219 @@ TEST(ClusterList, ColumnWidthKeepsTheForce) {
       }
     }
   }
+}
+
+float MaxDisp2(const std::vector<double>& x, const std::vector<double>& y,
+               const std::vector<double>& z, const std::vector<float>& xref,
+               const std::vector<float>& yref, const std::vector<float>& zref, const double* box) {
+  float max_d = 0.f;
+  for (int i = 0; i < static_cast<int>(x.size()); ++i) {
+    const float dx = static_cast<float>(x[static_cast<size_t>(i)]) - xref[static_cast<size_t>(i)];
+    const float dy = static_cast<float>(y[static_cast<size_t>(i)]) - yref[static_cast<size_t>(i)];
+    const float dz = static_cast<float>(z[static_cast<size_t>(i)]) - zref[static_cast<size_t>(i)];
+    const float lx = static_cast<float>(box[0]);
+    const float ly = static_cast<float>(box[1]);
+    const float lz = static_cast<float>(box[2]);
+    const float mx = dx - lx * rintf(dx / lx);
+    const float my = dy - ly * rintf(dy / ly);
+    const float mz = dz - lz * rintf(dz / lz);
+    max_d = std::max(max_d, mx * mx + my * my + mz * mz);
+  }
+  return max_d;
+}
+
+void StoreRef(const std::vector<double>& x, const std::vector<double>& y,
+              const std::vector<double>& z, std::vector<float>* xref, std::vector<float>* yref,
+              std::vector<float>* zref) {
+  xref->resize(x.size());
+  yref->resize(y.size());
+  zref->resize(z.size());
+  for (int i = 0; i < static_cast<int>(x.size()); ++i) {
+    (*xref)[static_cast<size_t>(i)] = static_cast<float>(x[static_cast<size_t>(i)]);
+    (*yref)[static_cast<size_t>(i)] = static_cast<float>(y[static_cast<size_t>(i)]);
+    (*zref)[static_cast<size_t>(i)] = static_cast<float>(z[static_cast<size_t>(i)]);
+  }
+}
+
+void LeapTile(std::vector<double>* x, std::vector<double>* y, std::vector<double>* z,
+              std::vector<double>* vx, std::vector<double>* vy, std::vector<double>* vz,
+              const tilemd::TileForces& force, double dt, double mass, const double* box) {
+  for (int i = 0; i < static_cast<int>(x->size()); ++i) {
+    (*vx)[static_cast<size_t>(i)] += dt * force.fx[static_cast<size_t>(i)] / mass;
+    (*vy)[static_cast<size_t>(i)] += dt * force.fy[static_cast<size_t>(i)] / mass;
+    (*vz)[static_cast<size_t>(i)] += dt * force.fz[static_cast<size_t>(i)] / mass;
+    (*x)[static_cast<size_t>(i)] = tilemd::WrapCoord(
+        (*x)[static_cast<size_t>(i)] + dt * (*vx)[static_cast<size_t>(i)], box[0]);
+    (*y)[static_cast<size_t>(i)] = tilemd::WrapCoord(
+        (*y)[static_cast<size_t>(i)] + dt * (*vy)[static_cast<size_t>(i)], box[1]);
+    (*z)[static_cast<size_t>(i)] = tilemd::WrapCoord(
+        (*z)[static_cast<size_t>(i)] + dt * (*vz)[static_cast<size_t>(i)], box[2]);
+  }
+}
+
+double MaxForceDelta(const tilemd::TileForces& a, const tilemd::TileForces& b) {
+  double max_delta = 0.0;
+  for (int i = 0; i < static_cast<int>(a.fx.size()); ++i) {
+    max_delta =
+        std::max(max_delta, std::abs(a.fx[static_cast<size_t>(i)] - b.fx[static_cast<size_t>(i)]));
+    max_delta =
+        std::max(max_delta, std::abs(a.fy[static_cast<size_t>(i)] - b.fy[static_cast<size_t>(i)]));
+    max_delta =
+        std::max(max_delta, std::abs(a.fz[static_cast<size_t>(i)] - b.fz[static_cast<size_t>(i)]));
+  }
+  return max_delta;
+}
+
+TEST(ClusterList, HeldListSurvivesAWrapBeforeTheSkin) {
+  const double box[3] = {10.0, 10.0, 10.0};
+  const double skin = 0.3;
+  const double dt = 0.01;
+  const double mass = 1.0;
+  const tilemd::LjPair pair;
+  std::vector<int> type = {0, 0};
+  std::vector<double> x = {0.02, 2.2};
+  std::vector<double> y = {5.0, 5.0};
+  std::vector<double> z = {5.0, 5.0};
+  std::vector<double> vx = {-0.5, 0.5};
+  std::vector<double> vy = {0.0, 0.0};
+  std::vector<double> vz = {0.0, 0.0};
+  const tilemd::TileForces initial = tilemd::ComputeTileForces(
+      box, x.data(), y.data(), z.data(), type.data(), 2, &pair, 1, skin, tilemd::LjShift::None);
+  for (int i = 0; i < 2; ++i) {
+    vx[static_cast<size_t>(i)] -= 0.5 * dt * initial.fx[static_cast<size_t>(i)] / mass;
+    vy[static_cast<size_t>(i)] -= 0.5 * dt * initial.fy[static_cast<size_t>(i)] / mass;
+    vz[static_cast<size_t>(i)] -= 0.5 * dt * initial.fz[static_cast<size_t>(i)] / mass;
+  }
+  tilemd::ClusterGrid held = tilemd::BuildClusterGrid(box, x.data(), y.data(), z.data(),
+                                                      type.data(), 2, pair.cutoff + skin);
+  tilemd::ClusterPairs held_pairs = tilemd::BuildClusterPairs(held);
+  std::vector<double> x_hold = x;
+  std::vector<double> y_hold = y;
+  std::vector<double> z_hold = z;
+  std::vector<float> xref;
+  std::vector<float> yref;
+  std::vector<float> zref;
+  StoreRef(x, y, z, &xref, &yref, &zref);
+  const float trigger2 = static_cast<float>((skin * 0.5) * (skin * 0.5));
+  bool wrapped = false;
+  double max_force = 0.0;
+  for (int step = 0; step < 20; ++step) {
+    const float disp2 = MaxDisp2(x, y, z, xref, yref, zref, box);
+    EXPECT_FALSE(tilemd::DisplacementNeedsRebuild(disp2, trigger2)) << step;
+    const tilemd::TileForces rebuilt = tilemd::ComputeTileForces(
+        box, x.data(), y.data(), z.data(), type.data(), 2, &pair, 1, skin, tilemd::LjShift::None);
+    const tilemd::TileForces kept = tilemd::ComputeTileForcesOnList(
+        held, held_pairs, x.data(), y.data(), z.data(), x_hold.data(), y_hold.data(), z_hold.data(),
+        &pair, 1, tilemd::LjShift::None);
+    max_force = std::max(max_force, MaxForceDelta(rebuilt, kept));
+    const double x_before = x[0];
+    LeapTile(&x, &y, &z, &vx, &vy, &vz, kept, dt, mass, box);
+    if (x_before < 1.0 && x[0] > 5.0) {
+      wrapped = true;
+      const float after = MaxDisp2(x, y, z, xref, yref, zref, box);
+      EXPECT_FALSE(tilemd::DisplacementNeedsRebuild(after, trigger2));
+      break;
+    }
+  }
+  std::cout << "wrap held-list max |dF| " << max_force << "\n";
+  EXPECT_TRUE(wrapped);
+  EXPECT_LT(max_force, 1.0e-12);
+}
+
+TEST(ClusterList, SkinRebuildMatchesEveryStepFor1000) {
+  const double box[3] = {8.0, 8.0, 8.0};
+  const double skin = 0.3;
+  const double dt = 0.005;
+  const double mass = 1.0;
+  const int n = 40;
+  const tilemd::LjPair pair;
+  std::vector<int> type(static_cast<size_t>(n), 0);
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    x[static_cast<size_t>(i)] = 0.5 + (i % 5) * 1.5;
+    y[static_cast<size_t>(i)] = 0.5 + ((i / 5) % 4) * 1.8;
+    z[static_cast<size_t>(i)] = 0.6 + (i / 20) * 3.0;
+  }
+  std::mt19937 rng(11);
+  std::normal_distribution<double> speed(0.0, 0.2);
+  std::vector<double> vx(static_cast<size_t>(n));
+  std::vector<double> vy(static_cast<size_t>(n));
+  std::vector<double> vz(static_cast<size_t>(n));
+  double px = 0.0;
+  double py = 0.0;
+  double pz = 0.0;
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] = speed(rng);
+    vy[static_cast<size_t>(i)] = speed(rng);
+    vz[static_cast<size_t>(i)] = speed(rng);
+    px += vx[static_cast<size_t>(i)];
+    py += vy[static_cast<size_t>(i)];
+    pz += vz[static_cast<size_t>(i)];
+  }
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] -= px / static_cast<double>(n);
+    vy[static_cast<size_t>(i)] -= py / static_cast<double>(n);
+    vz[static_cast<size_t>(i)] -= pz / static_cast<double>(n);
+  }
+  const tilemd::TileForces initial = tilemd::ComputeTileForces(
+      box, x.data(), y.data(), z.data(), type.data(), n, &pair, 1, skin, tilemd::LjShift::None);
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] -= 0.5 * dt * initial.fx[static_cast<size_t>(i)] / mass;
+    vy[static_cast<size_t>(i)] -= 0.5 * dt * initial.fy[static_cast<size_t>(i)] / mass;
+    vz[static_cast<size_t>(i)] -= 0.5 * dt * initial.fz[static_cast<size_t>(i)] / mass;
+  }
+  std::vector<double> x_every = x;
+  std::vector<double> y_every = y;
+  std::vector<double> z_every = z;
+  std::vector<double> vx_every = vx;
+  std::vector<double> vy_every = vy;
+  std::vector<double> vz_every = vz;
+  tilemd::ClusterGrid held = tilemd::BuildClusterGrid(box, x.data(), y.data(), z.data(),
+                                                      type.data(), n, pair.cutoff + skin);
+  tilemd::ClusterPairs held_pairs = tilemd::BuildClusterPairs(held);
+  std::vector<double> x_hold = x;
+  std::vector<double> y_hold = y;
+  std::vector<double> z_hold = z;
+  std::vector<float> xref;
+  std::vector<float> yref;
+  std::vector<float> zref;
+  StoreRef(x, y, z, &xref, &yref, &zref);
+  const float trigger2 = static_cast<float>((skin * 0.5) * (skin * 0.5));
+  int rebuilds = 1;
+  double max_x = 0.0;
+  for (int step = 0; step < 1000; ++step) {
+    const tilemd::TileForces every =
+        tilemd::ComputeTileForces(box, x_every.data(), y_every.data(), z_every.data(), type.data(),
+                                  n, &pair, 1, skin, tilemd::LjShift::None);
+    const float disp2 = MaxDisp2(x, y, z, xref, yref, zref, box);
+    if (tilemd::DisplacementNeedsRebuild(disp2, trigger2)) {
+      held = tilemd::BuildClusterGrid(box, x.data(), y.data(), z.data(), type.data(), n,
+                                      pair.cutoff + skin);
+      held_pairs = tilemd::BuildClusterPairs(held);
+      x_hold = x;
+      y_hold = y;
+      z_hold = z;
+      StoreRef(x, y, z, &xref, &yref, &zref);
+      ++rebuilds;
+    }
+    const tilemd::TileForces kept = tilemd::ComputeTileForcesOnList(
+        held, held_pairs, x.data(), y.data(), z.data(), x_hold.data(), y_hold.data(), z_hold.data(),
+        &pair, 1, tilemd::LjShift::None);
+    LeapTile(&x_every, &y_every, &z_every, &vx_every, &vy_every, &vz_every, every, dt, mass, box);
+    LeapTile(&x, &y, &z, &vx, &vy, &vz, kept, dt, mass, box);
+    for (int i = 0; i < n; ++i) {
+      max_x =
+          std::max(max_x, std::abs(x[static_cast<size_t>(i)] - x_every[static_cast<size_t>(i)]));
+      max_x =
+          std::max(max_x, std::abs(y[static_cast<size_t>(i)] - y_every[static_cast<size_t>(i)]));
+      max_x =
+          std::max(max_x, std::abs(z[static_cast<size_t>(i)] - z_every[static_cast<size_t>(i)]));
+    }
+  }
+  std::cout << "skin vs every-step rebuilds " << rebuilds << " max |dx| " << max_x << "\n";
+  EXPECT_GT(rebuilds, 1);
+  EXPECT_LT(rebuilds, 1000);
+  EXPECT_LT(max_x, 1.0e-6);
 }

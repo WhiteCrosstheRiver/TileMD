@@ -244,15 +244,15 @@ void DecodeShift(int shift, int* sx, int* sy, int* sz) {
   *sz = shift / 9 - 1;
 }
 
-}  // namespace
+// Wrapped `now` on the same branch as `ref`. Motion below half a box crosses
+// at most one boundary, so the rounded quotient is that crossing.
+double OnReferenceBranch(double now, double ref, double length) {
+  return now + length * std::rint((ref - now) / length);
+}
 
-TileForces ComputeTileForces(const double* box, const double* x, const double* y, const double* z,
-                             const int* type, int n, const LjPair* pairs, int npair, double skin,
-                             LjShift shift, int nx, int ny) {
-  if (skin < 0.0) throw std::invalid_argument("skin must be non-negative");
+void FillPairs(Prepared table[kMaxTypes][kMaxTypes], const LjPair* pairs, int npair, LjShift shift,
+               double* max_cut) {
   if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
-  Prepared table[kMaxTypes][kMaxTypes] = {};
-  double max_cut = 0.0;
   for (int p = 0; p < npair; ++p) {
     const LjPair& coeff = pairs[p];
     if (coeff.type_i < 0 || coeff.type_j < 0 || coeff.type_i >= kMaxTypes ||
@@ -279,11 +279,15 @@ TileForces ComputeTileForces(const double* box, const double* x, const double* y
     };
     fill(coeff.type_i, coeff.type_j);
     if (coeff.type_i != coeff.type_j) fill(coeff.type_j, coeff.type_i);
-    max_cut = std::max(max_cut, coeff.cutoff);
+    *max_cut = std::max(*max_cut, coeff.cutoff);
   }
+}
 
-  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, max_cut + skin, nx, ny);
-  const ClusterPairs list = BuildClusterPairs(grid);
+TileForces WalkTilePairs(const ClusterGrid& grid, const ClusterPairs& list, const double* x,
+                         const double* y, const double* z, const double* xref, const double* yref,
+                         const double* zref, const Prepared table[kMaxTypes][kMaxTypes],
+                         LjShift shift, bool hold_reference) {
+  const int n = grid.n_real;
   TileForces out;
   out.fx.assign(static_cast<size_t>(n), 0.0);
   out.fy.assign(static_cast<size_t>(n), 0.0);
@@ -301,20 +305,30 @@ TileForces ComputeTileForces(const double* box, const double* x, const double* y
         if (grid.type[static_cast<size_t>(slot_i)] == kMaskType) continue;
         const int gid_i = grid.gid[static_cast<size_t>(slot_i)];
         const int ti = grid.type[static_cast<size_t>(slot_i)];
-        const double xi = grid.x[static_cast<size_t>(slot_i)];
-        const double yi = grid.y[static_cast<size_t>(slot_i)];
-        const double zi = grid.z[static_cast<size_t>(slot_i)];
+        const double xi =
+            hold_reference ? OnReferenceBranch(x[gid_i], xref[gid_i], grid.box[0]) : x[gid_i];
+        const double yi =
+            hold_reference ? OnReferenceBranch(y[gid_i], yref[gid_i], grid.box[1]) : y[gid_i];
+        const double zi =
+            hold_reference ? OnReferenceBranch(z[gid_i], zref[gid_i], grid.box[2]) : z[gid_i];
         for (int local_j = 0; local_j < kClusterSize; ++local_j) {
           const int slot_j = cj * kClusterSize + local_j;
           if (grid.type[static_cast<size_t>(slot_j)] == kMaskType) continue;
           if (ci == cj && local_i == local_j && sx == 0 && sy == 0 && sz == 0) continue;
           ++out.pairs_visited;
+          const int gid_j = grid.gid[static_cast<size_t>(slot_j)];
           const int tj = grid.type[static_cast<size_t>(slot_j)];
           const Prepared& row = table[ti][tj];
           if (!row.defined) throw std::invalid_argument("missing pair coefficient");
-          const double dx = xi - (grid.x[static_cast<size_t>(slot_j)] + sx * grid.box[0]);
-          const double dy = yi - (grid.y[static_cast<size_t>(slot_j)] + sy * grid.box[1]);
-          const double dz = zi - (grid.z[static_cast<size_t>(slot_j)] + sz * grid.box[2]);
+          const double xj =
+              hold_reference ? OnReferenceBranch(x[gid_j], xref[gid_j], grid.box[0]) : x[gid_j];
+          const double yj =
+              hold_reference ? OnReferenceBranch(y[gid_j], yref[gid_j], grid.box[1]) : y[gid_j];
+          const double zj =
+              hold_reference ? OnReferenceBranch(z[gid_j], zref[gid_j], grid.box[2]) : z[gid_j];
+          const double dx = xi - (xj + static_cast<double>(sx) * grid.box[0]);
+          const double dy = yi - (yj + static_cast<double>(sy) * grid.box[1]);
+          const double dz = zi - (zj + static_cast<double>(sz) * grid.box[2]);
           const double r2 = dx * dx + dy * dy + dz * dz;
           if (r2 >= row.rc2) continue;
           ++out.pairs_inside;
@@ -346,6 +360,43 @@ TileForces ComputeTileForces(const double* box, const double* x, const double* y
     }
   }
   return out;
+}
+
+}  // namespace
+
+TileForces ComputeTileForces(const double* box, const double* x, const double* y, const double* z,
+                             const int* type, int n, const LjPair* pairs, int npair, double skin,
+                             LjShift shift, int nx, int ny) {
+  if (skin < 0.0) throw std::invalid_argument("skin must be non-negative");
+  Prepared table[kMaxTypes][kMaxTypes] = {};
+  double max_cut = 0.0;
+  FillPairs(table, pairs, npair, shift, &max_cut);
+
+  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, max_cut + skin, nx, ny);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  std::vector<double> wrapped_x(static_cast<size_t>(n));
+  std::vector<double> wrapped_y(static_cast<size_t>(n));
+  std::vector<double> wrapped_z(static_cast<size_t>(n));
+  for (int slot = 0; slot < static_cast<int>(grid.gid.size()); ++slot) {
+    const int gid = grid.gid[static_cast<size_t>(slot)];
+    if (gid < 0) continue;
+    wrapped_x[static_cast<size_t>(gid)] = grid.x[static_cast<size_t>(slot)];
+    wrapped_y[static_cast<size_t>(gid)] = grid.y[static_cast<size_t>(slot)];
+    wrapped_z[static_cast<size_t>(gid)] = grid.z[static_cast<size_t>(slot)];
+  }
+  return WalkTilePairs(grid, list, wrapped_x.data(), wrapped_y.data(), wrapped_z.data(), nullptr,
+                       nullptr, nullptr, table, shift, false);
+}
+
+TileForces ComputeTileForcesOnList(const ClusterGrid& grid, const ClusterPairs& list,
+                                   const double* x, const double* y, const double* z,
+                                   const double* xref, const double* yref, const double* zref,
+                                   const LjPair* pairs, int npair, LjShift shift) {
+  Prepared table[kMaxTypes][kMaxTypes] = {};
+  double max_cut = 0.0;
+  FillPairs(table, pairs, npair, shift, &max_cut);
+  (void)max_cut;
+  return WalkTilePairs(grid, list, x, y, z, xref, yref, zref, table, shift, true);
 }
 
 }  // namespace tilemd
