@@ -7,10 +7,10 @@
 -- TileMD fast-math: OFF
 -- Configuring done (0.3s)
 -- Generating done (0.0s)
--- Build files have been written to: TileMD/build
+-- Build files have been written to: C:/Users/USER/Desktop/codes/TileMD/build
 ninja: no work to do.
-Internal ctest changing into directory: TileMD/build
-Test project TileMD/build
+Internal ctest changing into directory: C:/Users/USER/Desktop/codes/TileMD/build
+Test project C:/Users/USER/Desktop/codes/TileMD/build
     Start 1: cpu_smoke
 1/2 Test #1: cpu_smoke ........................   Passed    1.60 sec
     Start 3: tilemd_version
@@ -21,17 +21,17 @@ Test project TileMD/build
 Label Time Summary:
 cpu    =   1.61 sec*proc (2 tests)
 
-Total Test time (real) =   1.62 sec
+Total Test time (real) =   1.61 sec
 
 === GPU tests ===
-Internal ctest changing into directory: TileMD/build
-Test project TileMD/build
+Internal ctest changing into directory: C:/Users/USER/Desktop/codes/TileMD/build
+Test project C:/Users/USER/Desktop/codes/TileMD/build
     Start 2: gpu_smoke
-1/1 Test #2: gpu_smoke ........................   Passed   39.53 sec
+1/1 Test #2: gpu_smoke ........................   Passed  153.91 sec
 
 100% tests passed, 0 tests failed out of 1
 
 Label Time Summary:
-gpu    =  39.53 sec*proc (1 test)
+gpu    = 153.91 sec*proc (1 test)
 
-Total Test time (real) =  39.54 sec
+Total Test time (real) = 153.92 sec

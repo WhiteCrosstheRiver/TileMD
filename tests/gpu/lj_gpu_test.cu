@@ -6,7 +6,11 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
 #include <random>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -277,4 +281,154 @@ TEST(GpuLj, OverflowIsDetectedThenGrows) {
     EXPECT_EQ(grown.fz[i], reference.fz[i]);
   }
   EXPECT_NEAR(grown.potential_energy, reference.potential_energy, 0.0);
+}
+
+struct ThermoRow {
+  int step = 0;
+  double temp = 0.0;
+  double pe = 0.0;
+  double ke = 0.0;
+  double press = 0.0;
+};
+
+std::vector<ThermoRow> ReadThermo(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("cannot open thermo file");
+  std::vector<ThermoRow> rows;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    ThermoRow row;
+    std::istringstream text(line);
+    text >> row.step >> row.temp >> row.pe >> row.ke >> row.press;
+    if (!text) throw std::runtime_error("truncated thermo row");
+    rows.push_back(row);
+  }
+  return rows;
+}
+
+tilemd::HostSystem LoadLammpsInitial(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("cannot open initial dump");
+  tilemd::HostSystem host;
+  host.shift = tilemd::Shift::None;
+  host.skin = 0.3;
+  host.dt = 0.005;
+  host.mass = 1.0;
+  host.rebuild_every_step = false;
+  tilemd::PairSpec spec;
+  spec.cutoff = 2.5;
+  host.pairs = {spec};
+  std::string line;
+  int n = -1;
+  while (std::getline(in, line)) {
+    if (line.rfind("ITEM: NUMBER OF ATOMS", 0) == 0) {
+      in >> n;
+      std::getline(in, line);
+    } else if (line.rfind("ITEM: BOX BOUNDS", 0) == 0) {
+      double lo = 0.0;
+      double hi = 0.0;
+      for (int axis = 0; axis < 3; ++axis) {
+        in >> lo >> hi;
+        host.box[axis] = hi - lo;
+        std::getline(in, line);
+      }
+    } else if (line.rfind("ITEM: ATOMS", 0) == 0) {
+      if (n < 1) throw std::runtime_error("dump has no atom count");
+      host.type.assign(n, 0);
+      host.x.assign(n, 0.0);
+      host.y.assign(n, 0.0);
+      host.z.assign(n, 0.0);
+      host.vx.assign(n, 0.0);
+      host.vy.assign(n, 0.0);
+      host.vz.assign(n, 0.0);
+      for (int row = 0; row < n; ++row) {
+        int id = 0;
+        int type = 0;
+        double x, y, z, vx, vy, vz;
+        in >> id >> type >> x >> y >> z >> vx >> vy >> vz;
+        if (!in) throw std::runtime_error("truncated initial dump");
+        if (id < 1 || id > n) throw std::runtime_error("LAMMPS id is outside 1..N");
+        const int slot = id - 1;
+        host.type[slot] = type - 1;
+        host.x[slot] = x;
+        host.y[slot] = y;
+        host.z[slot] = z;
+        host.vx[slot] = vx;
+        host.vy[slot] = vy;
+        host.vz[slot] = vz;
+      }
+      return host;
+    }
+  }
+  throw std::runtime_error("dump has no atoms");
+}
+
+double Mean(const std::vector<double>& values) {
+  double sum = 0.0;
+  for (double value : values) sum += value;
+  return sum / static_cast<double>(values.size());
+}
+
+double Stderr(const std::vector<double>& values) {
+  const double mean = Mean(values);
+  double acc = 0.0;
+  for (double value : values) acc += (value - mean) * (value - mean);
+  return std::sqrt(acc / static_cast<double>(values.size() - 1) /
+                   static_cast<double>(values.size()));
+}
+
+// T3: same 32k initial state as CPU LAMMPS, 10 000 NVE steps. Float forces
+// make the trajectories diverge, so the gate is the mean of the thermo samples
+// rather than a pointwise match.
+TEST(GpuLj, ShortNveMatchesLammps) {
+  if (!HasGpu()) GTEST_SKIP() << "No CUDA device";
+  const auto dump = SourcePath("tests/validation/lammps_ref/init_32k.dump");
+  const auto thermo = SourcePath("tests/validation/lammps_ref/melt_32k_thermo.txt");
+  if (!std::filesystem::exists(dump) || !std::filesystem::exists(thermo)) {
+    GTEST_SKIP() << "32k LAMMPS reference is missing";
+  }
+  const std::vector<ThermoRow> reference = ReadThermo(thermo);
+  ASSERT_EQ(reference.size(), 11u);
+  tilemd::HostSystem host = LoadLammpsInitial(dump);
+  ASSERT_EQ(host.x.size(), 32000u);
+  tilemd::Engine engine(host);
+  std::vector<double> pe;
+  std::vector<double> ke;
+  std::vector<double> press;
+  const double n = static_cast<double>(host.x.size());
+  const double volume = host.box[0] * host.box[1] * host.box[2];
+  for (int sample = 0; sample < static_cast<int>(reference.size()); ++sample) {
+    const tilemd::GpuForces forces = engine.ComputeForces();
+    ASSERT_EQ(forces.overflow, 0);
+    std::vector<double> vx;
+    std::vector<double> vy;
+    std::vector<double> vz;
+    engine.DownloadVelocities(vx, vy, vz);
+    double kinetic = 0.0;
+    for (int i = 0; i < static_cast<int>(vx.size()); ++i) {
+      kinetic += 0.5 * (vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
+    }
+    pe.push_back(forces.potential_energy / n);
+    ke.push_back(kinetic / n);
+    const double trace = forces.virial[0] + forces.virial[1] + forces.virial[2];
+    press.push_back((2.0 * kinetic + trace) / (3.0 * volume));
+    EXPECT_NEAR(pe.back(), reference[sample].pe, 0.05) << "step " << reference[sample].step;
+    EXPECT_NEAR(ke.back(), reference[sample].ke, 0.05) << "step " << reference[sample].step;
+    EXPECT_NEAR(press.back(), reference[sample].press, 0.15) << "step " << reference[sample].step;
+    if (sample + 1 < static_cast<int>(reference.size())) engine.Run(1000);
+  }
+  std::vector<double> ref_pe, ref_ke, ref_press;
+  for (const ThermoRow& row : reference) {
+    ref_pe.push_back(row.pe);
+    ref_ke.push_back(row.ke);
+    ref_press.push_back(row.press);
+  }
+  EXPECT_NEAR(Mean(pe), Mean(ref_pe), 0.02);
+  EXPECT_NEAR(Mean(ke), Mean(ref_ke), 0.02);
+  EXPECT_NEAR(Mean(press), Mean(ref_press), 0.05);
+  std::cout << "T3 mean pe " << Mean(pe) << " lammps " << Mean(ref_pe) << " stderr " << Stderr(pe)
+            << "\nT3 mean ke " << Mean(ke) << " lammps " << Mean(ref_ke) << " stderr " << Stderr(ke)
+            << "\nT3 mean P " << Mean(press) << " lammps " << Mean(ref_press) << " stderr "
+            << Stderr(press) << "\n";
 }

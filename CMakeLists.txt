@@ -68,6 +68,11 @@ add_library(tilemd_engine STATIC src/md/engine.cu)
 target_link_libraries(tilemd_engine PUBLIC tilemd_headers)
 tilemd_apply_cuda_flags(tilemd_engine)
 
+# T4 and T5 are multi-minute runs, so they stay out of ctest.
+add_executable(tilemd_long_run tests/validation/long_run.cu)
+target_link_libraries(tilemd_long_run PRIVATE tilemd_engine)
+tilemd_apply_cuda_flags(tilemd_long_run)
+
 if(TILEMD_BUILD_TESTS)
   include(CTest)
   enable_testing()
