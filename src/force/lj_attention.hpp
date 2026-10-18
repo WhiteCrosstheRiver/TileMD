@@ -90,10 +90,12 @@ class LjAttention {
   LjRow table_[kMaxTypes][kMaxTypes] = {};
 };
 
-// Full-list pair attention for Lennard-Jones, one thread per atom. The host
-// reduction of energy and virial walks atoms in index order.
+// One warp per i-cluster on the host-built cluster list. Pair coordinates are
+// the double-precision slot positions, not `pos4`. `skin` only widens the list.
+// The host reduction of energy and virial walks atoms in index order.
 AttentionResult RunLjAttentionGpu(const double* box, const double* x, const double* y,
                                   const double* z, const int* type, int n,
-                                  const AttentionPair* pairs, int npair, AttentionShift shift);
+                                  const AttentionPair* pairs, int npair, AttentionShift shift,
+                                  double skin = 0.3);
 
 }  // namespace tilemd

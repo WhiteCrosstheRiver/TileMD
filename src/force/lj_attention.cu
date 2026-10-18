@@ -2,8 +2,10 @@
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "force/lj_attention.hpp"
+#include "neighbor/cluster_list.hpp"
 
 namespace tilemd {
 namespace {
@@ -13,71 +15,155 @@ void CheckCuda(cudaError_t err, const char* what) {
   throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(err));
 }
 
-__global__ void LjAttentionKernel(int n, double lx, double ly, double lz, const double* x,
-                                  const double* y, const double* z, const int* type,
-                                  const LjRow* table, int force_shift, double* fx, double* fy,
-                                  double* fz, double* energy, double* virial) {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n) return;
-  const double xi = x[i];
-  const double yi = y[i];
-  const double zi = z[i];
-  const int ti = type[i];
-  double sum_x = 0.0;
-  double sum_y = 0.0;
-  double sum_z = 0.0;
-  double sum_1 = 0.0;
-  double pair_energy = 0.0;
-  double vxx = 0.0;
-  double vyy = 0.0;
-  double vzz = 0.0;
-  double vxy = 0.0;
-  double vxz = 0.0;
-  double vyz = 0.0;
-  for (int j = 0; j < n; ++j) {
-    if (i == j) continue;
-    const double dx = xi - x[j] - lx * rint((xi - x[j]) / lx);
-    const double dy = yi - y[j] - ly * rint((yi - y[j]) / ly);
-    const double dz = zi - z[j] - lz * rint((zi - z[j]) / lz);
-    const double r2 = dx * dx + dy * dy + dz * dz;
-    const LjRow row = table[ti * LjAttention::kMaxTypes + type[j]];
-    if (!row.defined || !(r2 < row.rc2) || !(r2 > 0.0)) continue;
-    double s = 0.0;
-    double u = 0.0;
-    LjEvaluate(row, r2, force_shift, &s, &u);
-    sum_x += s * (xi - dx);
-    sum_y += s * (yi - dy);
-    sum_z += s * (zi - dz);
-    sum_1 += s;
-    pair_energy += 0.5 * u;
-    const double fix = s * dx;
-    const double fiy = s * dy;
-    const double fiz = s * dz;
-    vxx += 0.5 * dx * fix;
-    vyy += 0.5 * dy * fiy;
-    vzz += 0.5 * dz * fiz;
-    vxy += 0.5 * dx * fiy;
-    vxz += 0.5 * dx * fiz;
-    vyz += 0.5 * dy * fiz;
+__device__ double ShflDouble(double value, int source) {
+  const int lo = __shfl_sync(0xffffffffu, __double2loint(value), source);
+  const int hi = __shfl_sync(0xffffffffu, __double2hiint(value), source);
+  return __hiloint2double(hi, lo);
+}
+
+__device__ double ReduceLane(double value, int i_local) {
+  double sum = ShflDouble(value, i_local);
+  sum += ShflDouble(value, i_local + 8);
+  sum += ShflDouble(value, i_local + 16);
+  sum += ShflDouble(value, i_local + 24);
+  return sum;
+}
+
+__device__ void DecodeShift(int shift, int* sx, int* sy, int* sz) {
+  *sx = shift % 3 - 1;
+  *sy = (shift / 3) % 3 - 1;
+  *sz = shift / 9 - 1;
+}
+
+// One warp per i-cluster. Lane = i_local + 8 * j_sub, matching the M5 tile kernel.
+// The four lanes that share an i atom reduce before one of them writes that atom.
+__global__ void __launch_bounds__(32)
+    LjAttentionTileKernel(const double* x, const double* y, const double* z, const int* type,
+                          const int* gid, const int* ci_start, const int* cj, const int* shift,
+                          const LjRow* table, int force_shift, double lx, double ly, double lz,
+                          int n, int ncluster, double* fx, double* fy, double* fz, double* energy,
+                          double* virial) {
+  const int lane = threadIdx.x;
+  const int ci = blockIdx.x;
+  if (ci >= ncluster) return;
+  const int i_local = lane % kClusterSize;
+  const int j_sub = lane / kClusterSize;
+  const int slot_i = ci * kClusterSize + i_local;
+  const int ti = type[slot_i];
+  const int gi = gid[slot_i];
+  const double xi = x[slot_i];
+  const double yi = y[slot_i];
+  const double zi = z[slot_i];
+
+  double ax = 0.0;
+  double ay = 0.0;
+  double az = 0.0;
+  double a1 = 0.0;
+  double ae = 0.0;
+  double axx = 0.0;
+  double ayy = 0.0;
+  double azz = 0.0;
+  double axy = 0.0;
+  double axz = 0.0;
+  double ayz = 0.0;
+
+  const int begin = ci_start[ci];
+  const int end = ci_start[ci + 1];
+  for (int pair0 = begin; pair0 < end; pair0 += 4) {
+    const int pair = pair0 + j_sub;
+    const bool active = pair < end;
+    const int other = active ? cj[pair] : 0;
+    int sx = 0;
+    int sy = 0;
+    int sz = 0;
+    if (active) DecodeShift(shift[pair], &sx, &sy, &sz);
+    const int slot_j = other * kClusterSize + i_local;
+    const int tj = active ? type[slot_j] : kMaskType;
+    double xj = 0.0;
+    double yj = 0.0;
+    double zj = 0.0;
+    if (active && tj != kMaskType) {
+      xj = x[slot_j] + static_cast<double>(sx) * lx;
+      yj = y[slot_j] + static_cast<double>(sy) * ly;
+      zj = z[slot_j] + static_cast<double>(sz) * lz;
+    }
+    for (int atom = 0; atom < kClusterSize; ++atom) {
+      const int source = atom + kClusterSize * j_sub;
+      const double bx = ShflDouble(xj, source);
+      const double by = ShflDouble(yj, source);
+      const double bz = ShflDouble(zj, source);
+      const int bt = __shfl_sync(0xffffffffu, tj, source);
+      if (!active || ti == kMaskType || bt == kMaskType) continue;
+      if (ci == other && atom == i_local && sx == 0 && sy == 0 && sz == 0) continue;
+      const LjRow row = table[ti * LjAttention::kMaxTypes + bt];
+      if (!row.defined) continue;
+      const double dx = xi - bx;
+      const double dy = yi - by;
+      const double dz = zi - bz;
+      const double r2 = dx * dx + dy * dy + dz * dz;
+      if (!(r2 < row.rc2) || !(r2 > 0.0)) continue;
+      double s = 0.0;
+      double u = 0.0;
+      LjEvaluate(row, r2, force_shift, &s, &u);
+      ax += s * (xi - dx);
+      ay += s * (yi - dy);
+      az += s * (zi - dz);
+      a1 += s;
+      ae += 0.5 * u;
+      const double fix = s * dx;
+      const double fiy = s * dy;
+      const double fiz = s * dz;
+      axx += 0.5 * dx * fix;
+      ayy += 0.5 * dy * fiy;
+      azz += 0.5 * dz * fiz;
+      axy += 0.5 * dx * fiy;
+      axz += 0.5 * dx * fiz;
+      ayz += 0.5 * dy * fiz;
+    }
   }
-  fx[i] = xi * sum_1 - sum_x;
-  fy[i] = yi * sum_1 - sum_y;
-  fz[i] = zi * sum_1 - sum_z;
-  energy[i] = pair_energy;
-  virial[i] = vxx;
-  virial[n + i] = vyy;
-  virial[2 * n + i] = vzz;
-  virial[3 * n + i] = vxy;
-  virial[4 * n + i] = vxz;
-  virial[5 * n + i] = vyz;
+
+  const double rx = ReduceLane(ax, i_local);
+  const double ry = ReduceLane(ay, i_local);
+  const double rz = ReduceLane(az, i_local);
+  const double r1 = ReduceLane(a1, i_local);
+  const double re = ReduceLane(ae, i_local);
+  const double rxx = ReduceLane(axx, i_local);
+  const double ryy = ReduceLane(ayy, i_local);
+  const double rzz = ReduceLane(azz, i_local);
+  const double rxy = ReduceLane(axy, i_local);
+  const double rxz = ReduceLane(axz, i_local);
+  const double ryz = ReduceLane(ayz, i_local);
+  if (j_sub == 0 && ti != kMaskType && gi >= 0) {
+    fx[gi] = xi * r1 - rx;
+    fy[gi] = yi * r1 - ry;
+    fz[gi] = zi * r1 - rz;
+    energy[gi] = re;
+    virial[0 * n + gi] = rxx;
+    virial[1 * n + gi] = ryy;
+    virial[2 * n + gi] = rzz;
+    virial[3 * n + gi] = rxy;
+    virial[4 * n + gi] = rxz;
+    virial[5 * n + gi] = ryz;
+  }
+}
+
+template <typename T>
+T* Upload(const std::vector<T>& host, const char* what) {
+  T* device = nullptr;
+  if (host.empty()) return nullptr;
+  CheckCuda(cudaMalloc(&device, host.size() * sizeof(T)), what);
+  CheckCuda(cudaMemcpy(device, host.data(), host.size() * sizeof(T), cudaMemcpyHostToDevice), what);
+  return device;
 }
 
 }  // namespace
 
 AttentionResult RunLjAttentionGpu(const double* box, const double* x, const double* y,
                                   const double* z, const int* type, int n,
-                                  const AttentionPair* pairs, int npair, AttentionShift shift) {
+                                  const AttentionPair* pairs, int npair, AttentionShift shift,
+                                  double skin) {
   if (n < 0) throw std::invalid_argument("atom count must be non-negative");
+  if (skin < 0.0) throw std::invalid_argument("skin must be non-negative");
   LjAttention potential(pairs, npair, shift);
   bool seen[LjAttention::kMaxTypes] = {};
   for (int i = 0; i < n; ++i) {
@@ -104,10 +190,17 @@ AttentionResult RunLjAttentionGpu(const double* box, const double* x, const doub
   out.energy.assign(static_cast<size_t>(n), 0.0);
   if (n == 0) return out;
 
-  double* dx = nullptr;
-  double* dy = nullptr;
-  double* dz = nullptr;
-  int* dtype = nullptr;
+  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, potential.Cutoff() + skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+
+  double* dx = Upload(grid.x, "copy x");
+  double* dy = Upload(grid.y, "copy y");
+  double* dz = Upload(grid.z, "copy z");
+  int* dtype = Upload(grid.type, "copy type");
+  int* dgid = Upload(grid.gid, "copy gid");
+  int* dstart = Upload(list.ci_start, "copy ci_start");
+  int* dcj = Upload(list.cj, "copy cj");
+  int* dshift = Upload(list.shift, "copy shift");
   LjRow* dtable = nullptr;
   double* dfx = nullptr;
   double* dfy = nullptr;
@@ -115,29 +208,26 @@ AttentionResult RunLjAttentionGpu(const double* box, const double* x, const doub
   double* denergy = nullptr;
   double* dvirial = nullptr;
   const size_t bytes = static_cast<size_t>(n) * sizeof(double);
-  CheckCuda(cudaMalloc(&dx, bytes), "cudaMalloc x");
-  CheckCuda(cudaMalloc(&dy, bytes), "cudaMalloc y");
-  CheckCuda(cudaMalloc(&dz, bytes), "cudaMalloc z");
-  CheckCuda(cudaMalloc(&dtype, static_cast<size_t>(n) * sizeof(int)), "cudaMalloc type");
   CheckCuda(cudaMalloc(&dtable, sizeof(table)), "cudaMalloc table");
   CheckCuda(cudaMalloc(&dfx, bytes), "cudaMalloc fx");
   CheckCuda(cudaMalloc(&dfy, bytes), "cudaMalloc fy");
   CheckCuda(cudaMalloc(&dfz, bytes), "cudaMalloc fz");
   CheckCuda(cudaMalloc(&denergy, bytes), "cudaMalloc energy");
   CheckCuda(cudaMalloc(&dvirial, 6 * bytes), "cudaMalloc virial");
-  CheckCuda(cudaMemcpy(dx, x, bytes, cudaMemcpyHostToDevice), "copy x");
-  CheckCuda(cudaMemcpy(dy, y, bytes, cudaMemcpyHostToDevice), "copy y");
-  CheckCuda(cudaMemcpy(dz, z, bytes, cudaMemcpyHostToDevice), "copy z");
-  CheckCuda(cudaMemcpy(dtype, type, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice),
-            "copy type");
   CheckCuda(cudaMemcpy(dtable, table, sizeof(table), cudaMemcpyHostToDevice), "copy table");
+  CheckCuda(cudaMemset(dfx, 0, bytes), "zero fx");
+  CheckCuda(cudaMemset(dfy, 0, bytes), "zero fy");
+  CheckCuda(cudaMemset(dfz, 0, bytes), "zero fz");
+  CheckCuda(cudaMemset(denergy, 0, bytes), "zero energy");
+  CheckCuda(cudaMemset(dvirial, 0, 6 * bytes), "zero virial");
 
-  const int block = 128;
-  const int grid = (n + block - 1) / block;
-  LjAttentionKernel<<<grid, block>>>(n, box[0], box[1], box[2], dx, dy, dz, dtype, dtable,
-                                     potential.ForceShift(), dfx, dfy, dfz, denergy, dvirial);
-  CheckCuda(cudaGetLastError(), "LjAttentionKernel");
-  CheckCuda(cudaDeviceSynchronize(), "LjAttentionKernel sync");
+  if (grid.ncluster > 0) {
+    LjAttentionTileKernel<<<grid.ncluster, 32>>>(
+        dx, dy, dz, dtype, dgid, dstart, dcj, dshift, dtable, potential.ForceShift(), grid.box[0],
+        grid.box[1], grid.box[2], n, grid.ncluster, dfx, dfy, dfz, denergy, dvirial);
+    CheckCuda(cudaGetLastError(), "LjAttentionTileKernel");
+    CheckCuda(cudaDeviceSynchronize(), "LjAttentionTileKernel sync");
+  }
 
   std::vector<double> partial(static_cast<size_t>(6 * n));
   CheckCuda(cudaMemcpy(out.fx.data(), dfx, bytes, cudaMemcpyDeviceToHost), "copy fx");
@@ -149,6 +239,10 @@ AttentionResult RunLjAttentionGpu(const double* box, const double* x, const doub
   cudaFree(dy);
   cudaFree(dz);
   cudaFree(dtype);
+  cudaFree(dgid);
+  cudaFree(dstart);
+  cudaFree(dcj);
+  cudaFree(dshift);
   cudaFree(dtable);
   cudaFree(dfx);
   cudaFree(dfy);
