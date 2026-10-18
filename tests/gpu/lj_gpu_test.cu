@@ -437,13 +437,16 @@ TEST(GpuLj, ShortNveMatchesLammps) {
 TEST(GpuLj, ClusterTileMatchesOracle) {
   if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
   tilemd::ref::System system;
-  system.box[0] = 8.0;
-  system.box[1] = 8.0;
-  system.box[2] = 8.0;
+  // reach is about (2.5 + 0.3) * (1 + 1e-4). floor(8 / reach) is 2, and the
+  // engine requires 3 cells on each axis. L = 12 leaves 4 cells. Atom 1 is the
+  // periodic image of a contact with atom 0.
+  system.box[0] = 12.0;
+  system.box[1] = 12.0;
+  system.box[2] = 12.0;
   system.shift = tilemd::ref::Shift::Force;
   system.pairs.push_back({0, 0, 1.0, 1.0, 2.5});
   std::mt19937 rng(5);
-  std::uniform_real_distribution<double> dist(0.5, 7.5);
+  std::uniform_real_distribution<double> dist(0.5, 11.5);
   for (int i = 0; i < 40; ++i) {
     system.type.push_back(0);
     system.x.push_back(dist(rng));
@@ -451,9 +454,9 @@ TEST(GpuLj, ClusterTileMatchesOracle) {
     system.z.push_back(dist(rng));
   }
   system.x[0] = 0.2;
-  system.x[1] = 7.9;
-  system.y[0] = system.y[1] = 4.0;
-  system.z[0] = system.z[1] = 4.0;
+  system.x[1] = 11.8;
+  system.y[0] = system.y[1] = 6.0;
+  system.z[0] = system.z[1] = 6.0;
   const tilemd::ref::Observables expected = tilemd::ref::Compute(system);
   tilemd::HostSystem host = FromReference(system, 0.3, 64, true);
   host.use_cluster_tiles = true;
