@@ -43,6 +43,32 @@ __constant__ int c_shift;
 __constant__ float c_neigh_cut2;
 __constant__ int c_rebuild_every;
 __constant__ float c_trigger2;
+__constant__ int c_thermo_every;
+
+constexpr int kThermoRing = 1024;
+
+struct ThermoRecord {
+  int step;
+  double ke;
+  double pe;
+  double wxx;
+  double wyy;
+  double wzz;
+  double wxy;
+  double wxz;
+  double wyz;
+};
+
+struct ThermoPartial {
+  double ke;
+  double pe;
+  double wxx;
+  double wyy;
+  double wzz;
+  double wxy;
+  double wxz;
+  double wyz;
+};
 
 #define TILEMD_CHECK(call)                                                               \
   do {                                                                                   \
@@ -278,9 +304,11 @@ __global__ void SortNeighbors(int* nl, const int* nn, const int* gid, int n, con
 __global__ void ForceKernel(const double* x, const double* y, const double* z, const int* type,
                             const int* nn, const int* nl, float* fx, float* fy, float* fz,
                             double* energy, double* wxx, double* wyy, double* wzz, double* wxy,
-                            double* wxz, double* wyz, int n, DeviceStatus* status) {
+                            double* wxz, double* wyz, int n, DeviceStatus* status,
+                            const int* ev_flag) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
+  const int ev = ev_flag != nullptr && *ev_flag != 0;
   int ti = type[i];
   double ax = 0.0;
   double ay = 0.0;
@@ -312,10 +340,11 @@ __global__ void ForceKernel(const double* x, const double* y, const double* z, c
     double sr2 = p.sigma2 * inv_r2;
     double sr6 = sr2 * sr2 * sr2;
     double s = p.eps24 * inv_r2 * sr6 * (2.0 * sr6 - 1.0);
-    double u = p.eps4 * sr6 * (sr6 - 1.0) - p.u_shift;
+    double u = 0.0;
+    if (ev) u = p.eps4 * sr6 * (sr6 - 1.0) - p.u_shift;
     if (c_shift == 2) {
       double r = sqrt(r2);
-      u += (r - p.rc) * p.s_rc * p.rc;
+      if (ev) u += (r - p.rc) * p.s_rc * p.rc;
       s -= p.s_rc * p.rc / r;
     }
     double fix = s * dx;
@@ -324,25 +353,123 @@ __global__ void ForceKernel(const double* x, const double* y, const double* z, c
     ax += fix;
     ay += fiy;
     az += fiz;
-    e += 0.5 * u;
-    axx += 0.5 * dx * fix;
-    ayy += 0.5 * dy * fiy;
-    azz += 0.5 * dz * fiz;
-    axy += 0.5 * dx * fiy;
-    axz += 0.5 * dx * fiz;
-    ayz += 0.5 * dy * fiz;
+    if (ev) {
+      e += 0.5 * u;
+      axx += 0.5 * dx * fix;
+      ayy += 0.5 * dy * fiy;
+      azz += 0.5 * dz * fiz;
+      axy += 0.5 * dx * fiy;
+      axz += 0.5 * dx * fiz;
+      ayz += 0.5 * dy * fiz;
+    }
   }
   fx[i] = static_cast<float>(ax);
   fy[i] = static_cast<float>(ay);
   fz[i] = static_cast<float>(az);
-  energy[i] = e;
-  wxx[i] = axx;
-  wyy[i] = ayy;
-  wzz[i] = azz;
-  wxy[i] = axy;
-  wxz[i] = axz;
-  wyz[i] = ayz;
+  if (ev) {
+    energy[i] = e;
+    wxx[i] = axx;
+    wyy[i] = ayy;
+    wzz[i] = azz;
+    wxy[i] = axy;
+    wxz[i] = axz;
+    wyz[i] = ayz;
+  }
   if (!isfinite(ax) || !isfinite(ay) || !isfinite(az)) atomicExch(&status->nan_detected, 1);
+}
+
+__global__ void SetEvFlag(int* ev_flag, const int* step) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  int every = c_thermo_every;
+  int next = *step + 1;
+  *ev_flag = (every > 0 && next % every == 0) ? 1 : 0;
+}
+
+__global__ void PartialThermo(const double* vx, const double* vy, const double* vz,
+                              const double* energy, const double* wxx, const double* wyy,
+                              const double* wzz, const double* wxy, const double* wxz,
+                              const double* wyz, int n, ThermoPartial* partial,
+                              const int* ev_flag) {
+  using Reduce = cub::BlockReduce<double, kBlock>;
+  __shared__ typename Reduce::TempStorage reduce_ke;
+  __shared__ typename Reduce::TempStorage reduce_pe;
+  __shared__ typename Reduce::TempStorage reduce_xx;
+  __shared__ typename Reduce::TempStorage reduce_yy;
+  __shared__ typename Reduce::TempStorage reduce_zz;
+  __shared__ typename Reduce::TempStorage reduce_xy;
+  __shared__ typename Reduce::TempStorage reduce_xz;
+  __shared__ typename Reduce::TempStorage reduce_yz;
+  const int ev = ev_flag != nullptr && *ev_flag != 0;
+  if (!ev) return;
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  double ke = 0.0;
+  double pe = 0.0;
+  double axx = 0.0;
+  double ayy = 0.0;
+  double azz = 0.0;
+  double axy = 0.0;
+  double axz = 0.0;
+  double ayz = 0.0;
+  if (i < n) {
+    ke = 0.5 * (vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
+    pe = energy[i];
+    axx = wxx[i];
+    ayy = wyy[i];
+    azz = wzz[i];
+    axy = wxy[i];
+    axz = wxz[i];
+    ayz = wyz[i];
+  }
+  ke = Reduce(reduce_ke).Sum(ke);
+  pe = Reduce(reduce_pe).Sum(pe);
+  axx = Reduce(reduce_xx).Sum(axx);
+  ayy = Reduce(reduce_yy).Sum(ayy);
+  azz = Reduce(reduce_zz).Sum(azz);
+  axy = Reduce(reduce_xy).Sum(axy);
+  axz = Reduce(reduce_xz).Sum(axz);
+  ayz = Reduce(reduce_yz).Sum(ayz);
+  if (threadIdx.x == 0) {
+    ThermoPartial out;
+    out.ke = ke;
+    out.pe = pe;
+    out.wxx = axx;
+    out.wyy = ayy;
+    out.wzz = azz;
+    out.wxy = axy;
+    out.wxz = axz;
+    out.wyz = ayz;
+    partial[blockIdx.x] = out;
+  }
+}
+
+__global__ void FinishThermo(const ThermoPartial* partial, int npartial, ThermoRecord* ring,
+                             int capacity, int* thermo_count, const int* step, const int* ev_flag,
+                             int label_plus, DeviceStatus* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  if (ev_flag == nullptr || *ev_flag == 0) return;
+  ThermoRecord rec{};
+  rec.step = *step + label_plus;
+  for (int b = 0; b < npartial; ++b) {
+    rec.ke += partial[b].ke;
+    rec.pe += partial[b].pe;
+    rec.wxx += partial[b].wxx;
+    rec.wyy += partial[b].wyy;
+    rec.wzz += partial[b].wzz;
+    rec.wxy += partial[b].wxy;
+    rec.wxz += partial[b].wxz;
+    rec.wyz += partial[b].wyz;
+  }
+  int slot = *thermo_count;
+  if (slot >= capacity) {
+    status->overflow = 1;
+    return;
+  }
+  ring[slot] = rec;
+  *thermo_count = slot + 1;
+}
+
+__global__ void IncrementStep(int* step) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) *step += 1;
 }
 
 __global__ void KickDrift(double* x, double* y, double* z, double* vx, double* vy, double* vz,
@@ -524,6 +651,16 @@ struct Engine::Impl {
   int* snap_imgz = nullptr;
   int* snap_type = nullptr;
   int* snap_gid = nullptr;
+  int* snap_step = nullptr;
+  int* snap_thermo_count = nullptr;
+  int* step_counter = nullptr;
+  int* thermo_count = nullptr;
+  int* ev_flag = nullptr;
+  ThermoRecord* thermo_ring = nullptr;
+  ThermoPartial* thermo_partial = nullptr;
+  int npartial = 0;
+  bool thermo_origin_written = false;
+  std::vector<ThermoSample> drained;
 
   void Upload();
   void ClearFlags();
@@ -534,6 +671,8 @@ struct Engine::Impl {
   void Snapshot(cudaStream_t stream);
   void RestoreSnapshot();
   void Capture(cudaStream_t stream, int count, cudaGraph_t* graph, cudaGraphExec_t* exec);
+  void RecordInitialThermo();
+  void DrainDeviceThermo();
   void ReallocList(int capacity);
   int BuildNeighbors(bool grow);
   void ComputeForce();
@@ -575,6 +714,13 @@ struct Engine::Impl {
     cudaFree(snap_imgz);
     cudaFree(snap_type);
     cudaFree(snap_gid);
+    cudaFree(snap_step);
+    cudaFree(snap_thermo_count);
+    cudaFree(step_counter);
+    cudaFree(thermo_count);
+    cudaFree(ev_flag);
+    cudaFree(thermo_ring);
+    cudaFree(thermo_partial);
     cudaFree(keys);
     cudaFree(sorted_keys);
     cudaFree(scratch_double);
@@ -736,6 +882,18 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
     impl_->snap_imgz = static_cast<int*>(MustMalloc(sizeof(int) * n));
     impl_->snap_type = static_cast<int*>(MustMalloc(sizeof(int) * n));
     impl_->snap_gid = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->snap_step = static_cast<int*>(MustMalloc(sizeof(int)));
+    impl_->snap_thermo_count = static_cast<int*>(MustMalloc(sizeof(int)));
+    impl_->step_counter = static_cast<int*>(MustMalloc(sizeof(int)));
+    impl_->thermo_count = static_cast<int*>(MustMalloc(sizeof(int)));
+    impl_->ev_flag = static_cast<int*>(MustMalloc(sizeof(int)));
+    impl_->npartial = Grid(n);
+    impl_->thermo_ring = static_cast<ThermoRecord*>(MustMalloc(sizeof(ThermoRecord) * kThermoRing));
+    impl_->thermo_partial =
+        static_cast<ThermoPartial*>(MustMalloc(sizeof(ThermoPartial) * impl_->npartial));
+    TILEMD_CHECK(cudaMemset(impl_->step_counter, 0, sizeof(int)));
+    TILEMD_CHECK(cudaMemset(impl_->thermo_count, 0, sizeof(int)));
+    TILEMD_CHECK(cudaMemset(impl_->ev_flag, 0, sizeof(int)));
 
     std::vector<double> zeros(n, 0.0);
     const double* vx = in.vx.empty() ? zeros.data() : in.vx.data();
@@ -810,6 +968,7 @@ void Engine::Impl::Upload() {
   TILEMD_CHECK(cudaMemcpyToSymbol(c_neigh_cut2, &neigh_cut2, sizeof(neigh_cut2)));
   TILEMD_CHECK(cudaMemcpyToSymbol(c_rebuild_every, &rebuild_every, sizeof(rebuild_every)));
   TILEMD_CHECK(cudaMemcpyToSymbol(c_trigger2, &trigger2, sizeof(trigger2)));
+  TILEMD_CHECK(cudaMemcpyToSymbol(c_thermo_every, &system.thermo_every, sizeof(int)));
 }
 
 void Engine::Impl::ClearFlags() {
@@ -916,9 +1075,15 @@ void Engine::Impl::LaunchStep(cudaStream_t stream) {
   DispKernel<<<Grid(n), kBlock, 0, stream>>>(pos, xref, n, status);
   DecideRebuild<<<1, 1, 0, stream>>>(status);
   QueueRebuild(stream);
+  SetEvFlag<<<1, 1, 0, stream>>>(ev_flag, step_counter);
   ForceKernel<<<Grid(n), kBlock, 0, stream>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy,
-                                              wzz, wxy, wxz, wyz, n, status);
+                                              wzz, wxy, wxz, wyz, n, status, ev_flag);
   Kick<<<Grid(n), kBlock, 0, stream>>>(vx, vy, vz, fx, fy, fz, n, dt, inv_mass);
+  PartialThermo<<<Grid(n), kBlock, 0, stream>>>(vx, vy, vz, energy, wxx, wyy, wzz, wxy, wxz, wyz, n,
+                                                thermo_partial, ev_flag);
+  FinishThermo<<<1, 1, 0, stream>>>(thermo_partial, npartial, thermo_ring, kThermoRing,
+                                    thermo_count, step_counter, ev_flag, 1, status);
+  IncrementStep<<<1, 1, 0, stream>>>(step_counter);
 }
 
 void Engine::Impl::Snapshot(cudaStream_t stream) {
@@ -933,6 +1098,10 @@ void Engine::Impl::Snapshot(cudaStream_t stream) {
   TILEMD_CHECK(cudaMemcpyAsync(snap_imgz, imgz, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
   TILEMD_CHECK(cudaMemcpyAsync(snap_type, type, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
   TILEMD_CHECK(cudaMemcpyAsync(snap_gid, gid, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(
+      cudaMemcpyAsync(snap_step, step_counter, sizeof(int), cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_thermo_count, thermo_count, sizeof(int),
+                               cudaMemcpyDeviceToDevice, stream));
 }
 
 void Engine::Impl::RestoreSnapshot() {
@@ -947,6 +1116,8 @@ void Engine::Impl::RestoreSnapshot() {
   TILEMD_CHECK(cudaMemcpy(imgz, snap_imgz, sizeof(int) * n, cudaMemcpyDeviceToDevice));
   TILEMD_CHECK(cudaMemcpy(type, snap_type, sizeof(int) * n, cudaMemcpyDeviceToDevice));
   TILEMD_CHECK(cudaMemcpy(gid, snap_gid, sizeof(int) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(step_counter, snap_step, sizeof(int), cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(thermo_count, snap_thermo_count, sizeof(int), cudaMemcpyDeviceToDevice));
   RefreshShadow<<<Grid(n), kBlock>>>(x, y, z, type, pos, n);
   CheckLaunch();
 }
@@ -997,9 +1168,50 @@ int Engine::Impl::BuildNeighbors(bool grow) {
 void Engine::Impl::ComputeForce() {
   ClearFlags();
   ForceKernel<<<Grid(n), kBlock>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy,
-                                   wxz, wyz, n, status);
+                                   wxz, wyz, n, status, nullptr);
   CheckLaunch();
   forces_ready = true;
+}
+
+void Engine::Impl::RecordInitialThermo() {
+  if (thermo_origin_written || system.thermo_every <= 0) return;
+  int one = 1;
+  TILEMD_CHECK(cudaMemcpy(ev_flag, &one, sizeof(one), cudaMemcpyHostToDevice));
+  ForceKernel<<<Grid(n), kBlock>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy,
+                                   wxz, wyz, n, status, ev_flag);
+  PartialThermo<<<Grid(n), kBlock>>>(vx, vy, vz, energy, wxx, wyy, wzz, wxy, wxz, wyz, n,
+                                     thermo_partial, ev_flag);
+  FinishThermo<<<1, 1>>>(thermo_partial, npartial, thermo_ring, kThermoRing, thermo_count,
+                         step_counter, ev_flag, 0, status);
+  CheckLaunch();
+  thermo_origin_written = true;
+}
+
+void Engine::Impl::DrainDeviceThermo() {
+  int count = 0;
+  TILEMD_CHECK(cudaMemcpy(&count, thermo_count, sizeof(count), cudaMemcpyDeviceToHost));
+  if (count < 0) count = 0;
+  if (count > kThermoRing) count = kThermoRing;
+  if (count == 0) return;
+  std::vector<ThermoRecord> raw(static_cast<size_t>(count));
+  TILEMD_CHECK(cudaMemcpy(raw.data(), thermo_ring, sizeof(ThermoRecord) * raw.size(),
+                          cudaMemcpyDeviceToHost));
+  drained.reserve(drained.size() + raw.size());
+  for (const ThermoRecord& rec : raw) {
+    ThermoSample sample;
+    sample.step = rec.step;
+    sample.kinetic_energy = rec.ke;
+    sample.potential_energy = rec.pe;
+    sample.virial[0] = rec.wxx;
+    sample.virial[1] = rec.wyy;
+    sample.virial[2] = rec.wzz;
+    sample.virial[3] = rec.wxy;
+    sample.virial[4] = rec.wxz;
+    sample.virial[5] = rec.wyz;
+    drained.push_back(sample);
+  }
+  int zero = 0;
+  TILEMD_CHECK(cudaMemcpy(thermo_count, &zero, sizeof(zero), cudaMemcpyHostToDevice));
 }
 
 GpuForces Engine::Impl::DownloadForces(int overflow) {
@@ -1091,6 +1303,7 @@ void Engine::Run(int steps) {
     if (overflow) throw std::runtime_error("initial neighbor list overflowed");
     impl_->ComputeForce();
   }
+  impl_->RecordInitialThermo();
   if (steps == 0) {
     impl_->forces_ready = true;
     return;
@@ -1137,9 +1350,17 @@ void Engine::Run(int steps) {
       graph.ResetGraph();
       impl_->Capture(graph.stream, unroll, &graph.graph, &graph.exec);
     }
+    impl_->DrainDeviceThermo();
     done += segment;
   }
   impl_->forces_ready = true;
+}
+
+std::vector<ThermoSample> Engine::DrainThermo() {
+  impl_->DrainDeviceThermo();
+  std::vector<ThermoSample> out;
+  out.swap(impl_->drained);
+  return out;
 }
 
 void ScatterToGid(const double* src, const int* gid, int n, std::vector<double>& dst) {

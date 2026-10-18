@@ -25,6 +25,9 @@ struct HostSystem {
   // 0 selects the density estimate from PLAN.md section 5.3.
   int max_neigh = 0;
   bool rebuild_every_step = true;
+  // 0 keeps energy and virial off the step path. Otherwise the device writes a
+  // thermo record when the completed step is a multiple of this interval.
+  int thermo_every = 0;
   std::vector<int> type;
   std::vector<double> x;
   std::vector<double> y;
@@ -33,6 +36,14 @@ struct HostSystem {
   std::vector<double> vy;
   std::vector<double> vz;
   std::vector<PairSpec> pairs;
+};
+
+struct ThermoSample {
+  int step = 0;
+  double kinetic_energy = 0.0;
+  double potential_energy = 0.0;
+  // xx, yy, zz, xy, xz, yz. Same full-list definition as the CPU oracle.
+  double virial[6] = {};
 };
 
 struct GpuForces {
@@ -48,8 +59,9 @@ struct GpuForces {
 
 // Thread-per-atom neighbor list and LJ force. Rebuilds reorder atoms by a
 // stable Morton cell code. Run captures 50 steps in a CUDA graph and copies
-// status back at segment boundaries of 1000 steps. Downloads scatter to the
-// original global-id order.
+// status back at segment boundaries of 1000 steps. Energy and virial are
+// computed only on thermo steps and reduced into a device ring. Downloads
+// scatter to the original global-id order.
 class Engine {
  public:
   explicit Engine(HostSystem system);
@@ -70,6 +82,8 @@ class Engine {
   int NumAtoms() const;
   int MaxNeigh() const;
   int RebuildCount() const;
+  // Copies thermo records gathered at segment boundaries and clears them.
+  std::vector<ThermoSample> DrainThermo();
 
  private:
   struct Impl;

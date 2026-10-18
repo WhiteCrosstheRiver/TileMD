@@ -10,3 +10,4 @@
 - M4 stable Morton reorder at each neighbor rebuild, with output still in the original atom order.
 - M4 device-side rebuild decision. The step loop no longer copies status back on every step.
 - M4 CUDA graph of 50 steps, with a segment snapshot that restores and grows the list on overflow.
+- M4 energy and virial only on thermo steps, reduced on device into a ring drained at segment boundaries.
