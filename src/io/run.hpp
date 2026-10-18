@@ -21,8 +21,10 @@ struct ThermoRow {
 
 // Integrates `input.steps` with velocity Verlet, or BAOAB when `langevin` is set.
 // Samples step 0 and every `thermo_every` steps. `thermo_every == 0` samples nothing.
-// Extended-XYZ dumps are not written.
-std::vector<ThermoRow> RunReference(const SimulationInput& input);
+// When `dump_every > 0` and `dump_path` is not empty, the same steps are appended
+// as extended-XYZ frames with positions and velocities.
+std::vector<ThermoRow> RunReference(const SimulationInput& input,
+                                    const std::string& dump_path = "");
 
 void WriteThermo(std::ostream& out, const std::vector<ThermoRow>& rows);
 

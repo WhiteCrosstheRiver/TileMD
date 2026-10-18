@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <string>
 
 #include "core/version.hpp"
 #include "io/input.hpp"
@@ -25,7 +26,9 @@ int main(int argc, char** argv) {
   }
   try {
     const tilemd::SimulationInput input = tilemd::ParseInputFile(argv[1]);
-    const std::vector<tilemd::ThermoRow> rows = tilemd::RunReference(input);
+    std::string dump_path;
+    if (input.dump_every > 0) dump_path = std::string(argv[1]) + ".dump.extxyz";
+    const std::vector<tilemd::ThermoRow> rows = tilemd::RunReference(input, dump_path);
     tilemd::WriteThermo(std::cout, rows);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "TileMD: %s\n", error.what());

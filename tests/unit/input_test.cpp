@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -142,6 +143,39 @@ TEST(Input, ZeroTemperatureLangevinCools) {
 
 TEST(Input, UnknownKeyIsRejected) {
   EXPECT_THROW(tilemd::ParseInput("nope 1\n", "."), std::runtime_error);
+}
+
+TEST(Input, DumpWritesAFrameOnTheRequestedSteps) {
+  std::string text = kMelt;
+  const auto dump = text.find("dump_every     0");
+  text.replace(dump, std::string("dump_every     0").size(), "dump_every     10");
+  const auto steps = text.find("run            10");
+  text.replace(steps, std::string("run            10").size(), "run            20");
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "tilemd_input_dump.extxyz";
+  std::filesystem::remove(path);
+  const std::vector<tilemd::ThermoRow> rows = tilemd::RunReference(input, path.string());
+  EXPECT_EQ(rows.size(), 1u);
+  std::ifstream in(path);
+  ASSERT_TRUE(in.good());
+  int frames = 0;
+  bool saw0 = false;
+  bool saw10 = false;
+  bool saw20 = false;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line == "32") ++frames;
+    if (line.find("step=0 ") != std::string::npos) saw0 = true;
+    if (line.find("step=10 ") != std::string::npos) saw10 = true;
+    if (line.find("step=20 ") != std::string::npos) saw20 = true;
+  }
+  EXPECT_EQ(frames, 3);
+  EXPECT_TRUE(saw0);
+  EXPECT_TRUE(saw10);
+  EXPECT_TRUE(saw20);
+  in.close();
+  std::filesystem::remove(path);
 }
 
 TEST(Input, StructureLoadsPositions) {

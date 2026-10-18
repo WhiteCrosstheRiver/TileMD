@@ -1,9 +1,11 @@
 #include "io/run.hpp"
 
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <ostream>
 #include <stdexcept>
+#include <string>
 
 namespace tilemd {
 namespace {
@@ -36,15 +38,44 @@ ThermoRow Sample(const SimulationInput& input, const ref::Dynamics& state, int s
   return row;
 }
 
+void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dynamics& state,
+                int step) {
+  const int n = ref::NumAtoms(input.system);
+  const char* shift = "none";
+  if (input.system.shift == ref::Shift::Energy) shift = "energy";
+  if (input.system.shift == ref::Shift::Force) shift = "force";
+  out << n << "\n";
+  out << "Lattice=\"" << input.system.box[0] << " 0 0 0 " << input.system.box[1] << " 0 0 0 "
+      << input.system.box[2] << "\" Properties=species:S:1:pos:R:3:vel:R:3:type:I:1 step=" << step
+      << " shift=" << shift << " pbc=\"T T T\"\n";
+  for (int i = 0; i < n; ++i) {
+    const int type = input.system.type[static_cast<size_t>(i)];
+    if (type < 0 || type > 25) throw std::runtime_error("type does not map to a species letter");
+    const char species = static_cast<char>('A' + type);
+    out << species << " " << state.x[static_cast<size_t>(i)] << " "
+        << state.y[static_cast<size_t>(i)] << " " << state.z[static_cast<size_t>(i)] << " "
+        << state.vx[static_cast<size_t>(i)] << " " << state.vy[static_cast<size_t>(i)] << " "
+        << state.vz[static_cast<size_t>(i)] << " " << type << "\n";
+  }
+}
+
 }  // namespace
 
-std::vector<ThermoRow> RunReference(const SimulationInput& input) {
+std::vector<ThermoRow> RunReference(const SimulationInput& input, const std::string& dump_path) {
   if (input.steps < 0) throw std::runtime_error("run length must be non-negative");
   if (!(input.timestep > 0.0)) throw std::runtime_error("timestep must be positive");
   ref::System system = input.system;
   ref::Dynamics state = ref::MakeDynamics(system, input.vx, input.vy, input.vz);
+  std::ofstream dump;
+  if (input.dump_every > 0 && !dump_path.empty()) {
+    dump.open(dump_path);
+    if (!dump) throw std::runtime_error("cannot write " + dump_path);
+    dump.setf(std::ios::scientific);
+    dump.precision(17);
+  }
   std::vector<ThermoRow> rows;
   if (input.thermo_every > 0) rows.push_back(Sample(input, state, 0));
+  if (dump) WriteFrame(dump, input, state, 0);
   for (int step = 1; step <= input.steps; ++step) {
     if (input.langevin) {
       ref::LangevinBaoabStep(system, state, input.timestep, input.mass, input.thermo,
@@ -55,6 +86,7 @@ std::vector<ThermoRow> RunReference(const SimulationInput& input) {
     if (input.thermo_every > 0 && step % input.thermo_every == 0) {
       rows.push_back(Sample(input, state, step));
     }
+    if (dump && step % input.dump_every == 0) WriteFrame(dump, input, state, step);
   }
   return rows;
 }
