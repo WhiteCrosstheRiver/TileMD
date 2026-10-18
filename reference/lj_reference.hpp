@@ -48,6 +48,18 @@ void WriteExtxyz(const std::string& path, const System& system);
 void WriteObservablesJson(const std::string& path, const std::string& name, const System& system,
                           const Observables& obs);
 
+// One extended-XYZ frame. Velocities are filled when Properties lists `vel`.
+struct ExtxyzFrame {
+  System system;
+  std::vector<double> vx;
+  std::vector<double> vy;
+  std::vector<double> vz;
+};
+
+// `frame` 0 is the first frame. Properties selects the columns. `pos` and
+// `type` are required. A file with no Properties line is species, position, type.
+ExtxyzFrame ReadExtxyzFrame(const std::string& path, int frame = 0);
+
 System ReadExtxyz(const std::string& path);
 void ReadSystemHeader(const std::string& path, System& system);
 Observables ReadObservablesJson(const std::string& path);

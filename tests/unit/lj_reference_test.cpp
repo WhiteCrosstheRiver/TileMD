@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace {
@@ -181,4 +182,43 @@ TEST(LjReference, MeltMatchesLammps) {
     EXPECT_NEAR(got.virial[k], reference.virial[k], 1.0e-9 * (1.0 + std::abs(reference.virial[k])))
         << "virial component " << k;
   }
+}
+
+TEST(LjReference, ExtxyzVelocityColumnIsNotTheType) {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "tilemd_extxyz_vel.extxyz";
+  {
+    std::ofstream out(path);
+    out << "2\n";
+    out << "Lattice=\"10 0 0 0 10 0 0 0 10\" Properties=species:S:1:pos:R:3:vel:R:3:type:I:1 "
+           "shift=energy pbc=\"T T T\"\n";
+    out << "B 1.5 2.5 3.5 4.5 5.5 6.5 1\n";
+    out << "A 0.25 0.5 0.75 9 8 7 0\n";
+    out << "1\n";
+    out << "Lattice=\"4 0 0 0 5 0 0 0 6\" Properties=species:S:1:pos:R:3:type:I:1 shift=force "
+           "pbc=\"T T T\"\n";
+    out << "C 1 2 3 2\n";
+  }
+  const tilemd::ref::ExtxyzFrame first = tilemd::ref::ReadExtxyzFrame(path.string(), 0);
+  EXPECT_EQ(tilemd::ref::NumAtoms(first.system), 2);
+  EXPECT_EQ(first.system.type[0], 1);
+  EXPECT_EQ(first.system.type[1], 0);
+  EXPECT_DOUBLE_EQ(first.system.x[0], 1.5);
+  EXPECT_DOUBLE_EQ(first.system.y[0], 2.5);
+  EXPECT_DOUBLE_EQ(first.system.z[0], 3.5);
+  EXPECT_DOUBLE_EQ(first.vx[0], 4.5);
+  EXPECT_DOUBLE_EQ(first.vy[0], 5.5);
+  EXPECT_DOUBLE_EQ(first.vz[0], 6.5);
+  EXPECT_EQ(first.system.shift, Shift::Energy);
+  EXPECT_DOUBLE_EQ(first.system.box[0], 10.0);
+  const tilemd::ref::ExtxyzFrame second = tilemd::ref::ReadExtxyzFrame(path.string(), 1);
+  EXPECT_EQ(tilemd::ref::NumAtoms(second.system), 1);
+  EXPECT_EQ(second.system.type[0], 2);
+  EXPECT_TRUE(second.vx.empty());
+  EXPECT_DOUBLE_EQ(second.system.x[0], 1.0);
+  EXPECT_DOUBLE_EQ(second.system.box[2], 6.0);
+  EXPECT_EQ(second.system.shift, Shift::Force);
+  EXPECT_EQ(tilemd::ref::ReadExtxyz(path.string()).type[0], 1);
+  EXPECT_THROW(tilemd::ref::ReadExtxyzFrame(path.string(), 2), std::runtime_error);
+  std::filesystem::remove(path);
 }

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -175,6 +176,53 @@ TEST(Input, DumpWritesAFrameOnTheRequestedSteps) {
   EXPECT_TRUE(saw10);
   EXPECT_TRUE(saw20);
   in.close();
+  const tilemd::ref::ExtxyzFrame first = tilemd::ref::ReadExtxyzFrame(path.string(), 0);
+  const tilemd::ref::ExtxyzFrame later = tilemd::ref::ReadExtxyzFrame(path.string(), 2);
+  ASSERT_EQ(tilemd::ref::NumAtoms(first.system), 32);
+  ASSERT_EQ(first.vx.size(), 32u);
+  tilemd::ref::System system = input.system;
+  tilemd::ref::Dynamics state = tilemd::ref::MakeDynamics(system, input.vx, input.vy, input.vz);
+  double max_dx = 0.0;
+  double max_dv = 0.0;
+  for (int i = 0; i < 32; ++i) {
+    EXPECT_EQ(first.system.type[static_cast<size_t>(i)], 0);
+    max_dx = std::max(
+        max_dx, std::abs(first.system.x[static_cast<size_t>(i)] - state.x[static_cast<size_t>(i)]));
+    max_dx = std::max(
+        max_dx, std::abs(first.system.y[static_cast<size_t>(i)] - state.y[static_cast<size_t>(i)]));
+    max_dx = std::max(
+        max_dx, std::abs(first.system.z[static_cast<size_t>(i)] - state.z[static_cast<size_t>(i)]));
+    max_dv = std::max(
+        max_dv, std::abs(first.vx[static_cast<size_t>(i)] - state.vx[static_cast<size_t>(i)]));
+    max_dv = std::max(
+        max_dv, std::abs(first.vy[static_cast<size_t>(i)] - state.vy[static_cast<size_t>(i)]));
+    max_dv = std::max(
+        max_dv, std::abs(first.vz[static_cast<size_t>(i)] - state.vz[static_cast<size_t>(i)]));
+  }
+  EXPECT_LT(max_dx, 1.0e-12);
+  EXPECT_LT(max_dv, 1.0e-12);
+  for (int step = 0; step < 20; ++step) {
+    tilemd::ref::VelocityVerletStep(system, state, input.timestep, input.mass);
+  }
+  max_dx = 0.0;
+  max_dv = 0.0;
+  for (int i = 0; i < 32; ++i) {
+    EXPECT_EQ(later.system.type[static_cast<size_t>(i)], 0);
+    max_dx = std::max(
+        max_dx, std::abs(later.system.x[static_cast<size_t>(i)] - state.x[static_cast<size_t>(i)]));
+    max_dx = std::max(
+        max_dx, std::abs(later.system.y[static_cast<size_t>(i)] - state.y[static_cast<size_t>(i)]));
+    max_dx = std::max(
+        max_dx, std::abs(later.system.z[static_cast<size_t>(i)] - state.z[static_cast<size_t>(i)]));
+    max_dv = std::max(
+        max_dv, std::abs(later.vx[static_cast<size_t>(i)] - state.vx[static_cast<size_t>(i)]));
+    max_dv = std::max(
+        max_dv, std::abs(later.vy[static_cast<size_t>(i)] - state.vy[static_cast<size_t>(i)]));
+    max_dv = std::max(
+        max_dv, std::abs(later.vz[static_cast<size_t>(i)] - state.vz[static_cast<size_t>(i)]));
+  }
+  EXPECT_LT(max_dx, 1.0e-12);
+  EXPECT_LT(max_dv, 1.0e-12);
   std::filesystem::remove(path);
 }
 

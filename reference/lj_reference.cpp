@@ -254,49 +254,167 @@ void WriteObservablesJson(const std::string& path, const std::string& name, cons
   out << "  ]\n}\n";
 }
 
-System ReadExtxyz(const std::string& path) {
+namespace {
+
+enum class XyzField { Species, Position, Velocity, Type, Text, Number };
+
+struct XyzColumn {
+  XyzField field = XyzField::Number;
+  int count = 0;
+};
+
+std::vector<XyzColumn> ColumnsFromComment(const std::string& comment) {
+  std::string spec = "species:S:1:pos:R:3:type:I:1";
+  const auto at = comment.find("Properties=");
+  if (at != std::string::npos) {
+    const std::string rest = comment.substr(at + std::string("Properties=").size());
+    const auto end = rest.find_first_of(" \t\"");
+    spec = end == std::string::npos ? rest : rest.substr(0, end);
+  }
+  std::vector<std::string> parts;
+  std::string token;
+  for (char ch : spec) {
+    if (ch == ':') {
+      parts.push_back(token);
+      token.clear();
+    } else {
+      token.push_back(ch);
+    }
+  }
+  if (!token.empty()) parts.push_back(token);
+  if (parts.empty() || parts.size() % 3 != 0) {
+    throw std::runtime_error("extxyz Properties list is incomplete");
+  }
+  std::vector<XyzColumn> columns;
+  bool saw_position = false;
+  bool saw_type = false;
+  for (size_t i = 0; i < parts.size(); i += 3) {
+    int count = 0;
+    try {
+      count = std::stoi(parts[i + 2]);
+    } catch (const std::exception&) {
+      throw std::runtime_error("extxyz property count is not an integer");
+    }
+    if (count < 1) throw std::runtime_error("extxyz property count must be positive");
+    XyzColumn column;
+    column.count = count;
+    const std::string& name = parts[i];
+    const std::string& kind = parts[i + 1];
+    if (kind == "S") {
+      column.field = (name == "species") ? XyzField::Species : XyzField::Text;
+    } else if (kind == "R" || kind == "I") {
+      if (name == "pos" && count == 3)
+        column.field = XyzField::Position;
+      else if (name == "vel" && count == 3)
+        column.field = XyzField::Velocity;
+      else if (name == "type" && count == 1)
+        column.field = XyzField::Type;
+      else
+        column.field = XyzField::Number;
+    } else {
+      throw std::runtime_error("unsupported extxyz property kind");
+    }
+    if (column.field == XyzField::Position) saw_position = true;
+    if (column.field == XyzField::Type) saw_type = true;
+    columns.push_back(column);
+  }
+  if (!saw_position || !saw_type) throw std::runtime_error("extxyz needs pos and type columns");
+  return columns;
+}
+
+void ReadAtomLine(std::istream& in, const std::vector<XyzColumn>& columns, int i,
+                  ExtxyzFrame* frame) {
+  std::string species;
+  int type = 0;
+  bool saw_species = false;
+  for (const XyzColumn& column : columns) {
+    if (column.field == XyzField::Species || column.field == XyzField::Text) {
+      for (int k = 0; k < column.count; ++k) {
+        std::string word;
+        in >> word;
+        if (column.field == XyzField::Species && k == 0) species = word;
+      }
+      if (column.field == XyzField::Species) saw_species = true;
+    } else if (column.field == XyzField::Position) {
+      in >> frame->system.x[static_cast<size_t>(i)] >> frame->system.y[static_cast<size_t>(i)] >>
+          frame->system.z[static_cast<size_t>(i)];
+    } else if (column.field == XyzField::Velocity) {
+      in >> frame->vx[static_cast<size_t>(i)] >> frame->vy[static_cast<size_t>(i)] >>
+          frame->vz[static_cast<size_t>(i)];
+    } else if (column.field == XyzField::Type) {
+      in >> type;
+    } else {
+      for (int k = 0; k < column.count; ++k) {
+        double ignored = 0.0;
+        in >> ignored;
+      }
+    }
+  }
+  if (!in || !saw_species || species.size() != 1) throw std::runtime_error("bad extxyz atom line");
+  frame->system.type[static_cast<size_t>(i)] = type;
+  if (TypeForSpecies(species[0]) != type) throw std::runtime_error("species/type mismatch");
+}
+
+}  // namespace
+
+ExtxyzFrame ReadExtxyzFrame(const std::string& path, int frame) {
+  if (frame < 0) throw std::runtime_error("extxyz frame must be non-negative");
   std::ifstream in(path);
   if (!in) throw std::runtime_error("cannot open " + path);
-  System system;
-  int n = 0;
-  in >> n;
-  if (!in || n < 0) throw std::runtime_error("bad atom count in " + path);
-  std::string comment;
-  std::getline(in, comment);
-  std::getline(in, comment);
-  const auto lattice = comment.find("Lattice=\"");
-  if (lattice == std::string::npos) throw std::runtime_error("extxyz is missing Lattice");
-  {
-    std::istringstream lattice_in(comment.substr(lattice + 9));
-    double m[9];
-    for (double& value : m) lattice_in >> value;
-    if (!lattice_in) throw std::runtime_error("failed to parse Lattice");
-    system.box[0] = m[0];
-    system.box[1] = m[4];
-    system.box[2] = m[8];
+  ExtxyzFrame out;
+  for (int index = 0; index <= frame; ++index) {
+    int n = 0;
+    in >> n;
+    if (!in || n < 0) throw std::runtime_error("bad atom count in " + path);
+    std::string comment;
+    std::getline(in, comment);
+    if (!std::getline(in, comment)) throw std::runtime_error("extxyz frame is missing a comment");
+    if (index != frame) {
+      for (int i = 0; i < n; ++i) {
+        std::string skipped;
+        if (!std::getline(in, skipped)) throw std::runtime_error("extxyz frame is truncated");
+      }
+      continue;
+    }
+    const auto lattice = comment.find("Lattice=\"");
+    if (lattice == std::string::npos) throw std::runtime_error("extxyz is missing Lattice");
+    {
+      std::istringstream lattice_in(comment.substr(lattice + 9));
+      double m[9];
+      for (double& value : m) lattice_in >> value;
+      if (!lattice_in) throw std::runtime_error("failed to parse Lattice");
+      out.system.box[0] = m[0];
+      out.system.box[1] = m[4];
+      out.system.box[2] = m[8];
+    }
+    const auto shift = comment.find("shift=");
+    if (shift == std::string::npos) throw std::runtime_error("extxyz is missing shift");
+    {
+      std::string word;
+      std::istringstream shift_in(comment.substr(shift + 6));
+      shift_in >> word;
+      out.system.shift = ParseShift(word);
+    }
+    const std::vector<XyzColumn> columns = ColumnsFromComment(comment);
+    bool has_velocity = false;
+    for (const XyzColumn& column : columns) {
+      if (column.field == XyzField::Velocity) has_velocity = true;
+    }
+    out.system.type.resize(static_cast<size_t>(n));
+    out.system.x.resize(static_cast<size_t>(n));
+    out.system.y.resize(static_cast<size_t>(n));
+    out.system.z.resize(static_cast<size_t>(n));
+    if (has_velocity) {
+      out.vx.assign(static_cast<size_t>(n), 0.0);
+      out.vy.assign(static_cast<size_t>(n), 0.0);
+      out.vz.assign(static_cast<size_t>(n), 0.0);
+    }
+    for (int i = 0; i < n; ++i) ReadAtomLine(in, columns, i, &out);
   }
-  const auto shift = comment.find("shift=");
-  if (shift == std::string::npos) throw std::runtime_error("extxyz is missing shift");
-  {
-    std::string word;
-    std::istringstream shift_in(comment.substr(shift + 6));
-    shift_in >> word;
-    system.shift = ParseShift(word);
-  }
-  system.type.resize(n);
-  system.x.resize(n);
-  system.y.resize(n);
-  system.z.resize(n);
-  for (int i = 0; i < n; ++i) {
-    std::string species;
-    int type = 0;
-    in >> species >> system.x[i] >> system.y[i] >> system.z[i] >> type;
-    if (!in || species.size() != 1) throw std::runtime_error("bad extxyz atom line");
-    system.type[i] = type;
-    if (TypeForSpecies(species[0]) != type) throw std::runtime_error("species/type mismatch");
-  }
-  return system;
+  return out;
 }
+
+System ReadExtxyz(const std::string& path) { return ReadExtxyzFrame(path, 0).system; }
 
 void ReadSystemHeader(const std::string& path, System& system) {
   const std::string text = ReadFile(path);
