@@ -596,6 +596,89 @@ TEST(ClusterList, HeldListSurvivesAWrapBeforeTheSkin) {
   EXPECT_LT(max_force, 1.0e-12);
 }
 
+TEST(ClusterList, FloatReferenceMatchesTheRebuiltListAcrossAWrap) {
+  const double box[3] = {10.0, 10.0, 10.0};
+  const double skin = 0.3;
+  const double dt = 0.01;
+  const double mass = 1.0;
+  const tilemd::LjPair pair;
+  std::vector<int> type = {0, 0};
+  std::vector<double> x = {0.02, 2.2};
+  std::vector<double> y = {5.0, 5.0};
+  std::vector<double> z = {5.0, 5.0};
+  std::vector<double> vx = {-0.5, 0.5};
+  std::vector<double> vy = {0.0, 0.0};
+  std::vector<double> vz = {0.0, 0.0};
+  const tilemd::TileForces initial = tilemd::ComputeTileForces(
+      box, x.data(), y.data(), z.data(), type.data(), 2, &pair, 1, skin, tilemd::LjShift::None);
+  for (int i = 0; i < 2; ++i) {
+    vx[static_cast<size_t>(i)] -= 0.5 * dt * initial.fx[static_cast<size_t>(i)] / mass;
+    vy[static_cast<size_t>(i)] -= 0.5 * dt * initial.fy[static_cast<size_t>(i)] / mass;
+    vz[static_cast<size_t>(i)] -= 0.5 * dt * initial.fz[static_cast<size_t>(i)] / mass;
+  }
+  const tilemd::ClusterGrid held = tilemd::BuildClusterGrid(box, x.data(), y.data(), z.data(),
+                                                            type.data(), 2, pair.cutoff + skin);
+  const tilemd::ClusterPairs held_pairs = tilemd::BuildClusterPairs(held);
+  std::vector<float> xref;
+  std::vector<float> yref;
+  std::vector<float> zref;
+  StoreRef(x, y, z, &xref, &yref, &zref);
+  EXPECT_EQ(tilemd::OnReferenceBranchFloat(xref[0], xref[0], box[0]), static_cast<double>(xref[0]));
+  std::vector<double> xf(2);
+  std::vector<double> yf(2);
+  std::vector<double> zf(2);
+  std::vector<double> xr(2);
+  std::vector<double> yr(2);
+  std::vector<double> zr(2);
+  for (int i = 0; i < 2; ++i) {
+    xr[static_cast<size_t>(i)] = static_cast<double>(xref[static_cast<size_t>(i)]);
+    yr[static_cast<size_t>(i)] = static_cast<double>(yref[static_cast<size_t>(i)]);
+    zr[static_cast<size_t>(i)] = static_cast<double>(zref[static_cast<size_t>(i)]);
+  }
+  const float trigger2 = static_cast<float>((skin * 0.5) * (skin * 0.5));
+  bool saw_low = false;
+  bool wrapped = false;
+  double max_force = 0.0;
+  for (int step = 0; step < 20; ++step) {
+    for (int i = 0; i < 2; ++i) {
+      xf[static_cast<size_t>(i)] =
+          static_cast<double>(static_cast<float>(x[static_cast<size_t>(i)]));
+      yf[static_cast<size_t>(i)] =
+          static_cast<double>(static_cast<float>(y[static_cast<size_t>(i)]));
+      zf[static_cast<size_t>(i)] =
+          static_cast<double>(static_cast<float>(z[static_cast<size_t>(i)]));
+    }
+    const float disp2 = MaxDisp2(x, y, z, xref, yref, zref, box);
+    EXPECT_FALSE(tilemd::DisplacementNeedsRebuild(disp2, trigger2)) << step;
+    const tilemd::TileForces rebuilt =
+        tilemd::ComputeTileForces(box, xf.data(), yf.data(), zf.data(), type.data(), 2, &pair, 1,
+                                  skin, tilemd::LjShift::None);
+    const tilemd::TileForces kept = tilemd::ComputeTileForcesOnList(
+        held, held_pairs, xf.data(), yf.data(), zf.data(), xr.data(), yr.data(), zr.data(), &pair,
+        1, tilemd::LjShift::None);
+    max_force = std::max(max_force, MaxForceDelta(rebuilt, kept));
+    const float now = static_cast<float>(x[0]);
+    const double back = tilemd::OnReferenceBranchFloat(now, xref[0], box[0]);
+    EXPECT_EQ(back, tilemd::OnReferenceBranch(static_cast<double>(now), xr[0], box[0]));
+    if (x[0] > 5.0) {
+      wrapped = true;
+      const double other =
+          tilemd::OnReferenceBranchFloat(static_cast<float>(x[1]), xref[1], box[0]);
+      EXPECT_LT(back, 0.0);
+      EXPECT_GT(back, -skin);
+      EXPECT_LT(std::abs(back - other), 3.0);
+      EXPECT_GT(std::abs(static_cast<double>(now) - other), 5.0);
+      break;
+    }
+    saw_low = saw_low || x[0] < 1.0;
+    LeapTile(&x, &y, &z, &vx, &vy, &vz, kept, dt, mass, box);
+  }
+  std::cout << "float-ref wrap max |dF| " << max_force << "\n";
+  EXPECT_TRUE(saw_low);
+  EXPECT_TRUE(wrapped);
+  EXPECT_LT(max_force, 1.0e-12);
+}
+
 TEST(ClusterList, SkinRebuildMatchesEveryStepFor1000) {
   const double box[3] = {8.0, 8.0, 8.0};
   const double skin = 0.3;

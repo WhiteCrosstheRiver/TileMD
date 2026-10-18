@@ -7,6 +7,7 @@
 #include "core/device_status.hpp"
 #include "md/flag_nan.hpp"
 #include "md/tile_force.hpp"
+#include "neighbor/cluster_order.hpp"
 
 namespace tilemd {
 namespace {
@@ -95,14 +96,6 @@ __device__ float MinImageTile(float delta, float length) {
   return delta - length * rintf(delta / length);
 }
 
-// `now` is wrapped. Adding the crossings since `ref` puts it back on the
-// branch the stored image shift was built for.
-__device__ double OnReferenceBranchTile(float now, float ref, double length) {
-  const double n = static_cast<double>(now);
-  const double r = static_cast<double>(ref);
-  return n + length * rint((r - n) / length);
-}
-
 // Pair geometry for the fused step is read from pos_cur. Only the lane that
 // owns an atom writes that atom's double position and velocity, and pos_next.
 struct TileIntegrate {
@@ -152,9 +145,9 @@ __global__ void __launch_bounds__(32)
     if (ti != kMaskType && gi >= 0) {
       const float4 self = integrate.pos_cur[gi];
       const float4 ref = integrate.xref[gi];
-      xi = OnReferenceBranchTile(self.x, ref.x, c_tile_box[0]);
-      yi = OnReferenceBranchTile(self.y, ref.y, c_tile_box[1]);
-      zi = OnReferenceBranchTile(self.z, ref.z, c_tile_box[2]);
+      xi = OnReferenceBranchFloat(self.x, ref.x, c_tile_box[0]);
+      yi = OnReferenceBranchFloat(self.y, ref.y, c_tile_box[1]);
+      zi = OnReferenceBranchFloat(self.z, ref.z, c_tile_box[2]);
     }
   } else {
     (void)gi;
@@ -197,11 +190,11 @@ __global__ void __launch_bounds__(32)
         if (gj >= 0) {
           const float4 other_pos = integrate.pos_cur[gj];
           const float4 ref = integrate.xref[gj];
-          xj = OnReferenceBranchTile(other_pos.x, ref.x, c_tile_box[0]) +
+          xj = OnReferenceBranchFloat(other_pos.x, ref.x, c_tile_box[0]) +
                static_cast<double>(sx) * c_tile_box[0];
-          yj = OnReferenceBranchTile(other_pos.y, ref.y, c_tile_box[1]) +
+          yj = OnReferenceBranchFloat(other_pos.y, ref.y, c_tile_box[1]) +
                static_cast<double>(sy) * c_tile_box[1];
-          zj = OnReferenceBranchTile(other_pos.z, ref.z, c_tile_box[2]) +
+          zj = OnReferenceBranchFloat(other_pos.z, ref.z, c_tile_box[2]) +
                static_cast<double>(sz) * c_tile_box[2];
         }
       } else {

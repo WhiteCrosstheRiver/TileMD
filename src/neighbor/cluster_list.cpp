@@ -244,12 +244,6 @@ void DecodeShift(int shift, int* sx, int* sy, int* sz) {
   *sz = shift / 9 - 1;
 }
 
-// Wrapped `now` on the same branch as `ref`. Motion below half a box crosses
-// at most one boundary, so the rounded quotient is that crossing.
-double OnReferenceBranch(double now, double ref, double length) {
-  return now + length * std::rint((ref - now) / length);
-}
-
 void FillPairs(Prepared table[kMaxTypes][kMaxTypes], const LjPair* pairs, int npair, LjShift shift,
                double* max_cut) {
   if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");

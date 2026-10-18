@@ -17,6 +17,21 @@ TILEMD_HD inline bool DisplacementNeedsRebuild(float disp2, float trigger2) {
   return disp2 > trigger2;
 }
 
+// Wrapped `now` on the branch `ref` was stored on. Motion below half a box
+// crosses at most one boundary. The fused kernel promotes float `pos4` values
+// and calls the same formula the host list uses on its double coordinates.
+TILEMD_HD inline double OnReferenceBranch(double now, double ref, double length) {
+#if defined(__CUDA_ARCH__)
+  return now + length * ::rint((ref - now) / length);
+#else
+  return now + length * std::rint((ref - now) / length);
+#endif
+}
+
+TILEMD_HD inline double OnReferenceBranchFloat(float now, float ref, double length) {
+  return OnReferenceBranch(static_cast<double>(now), static_cast<double>(ref), length);
+}
+
 // Shared by the host cluster builder and the device rebuild. The device sort
 // keys z with OrderedZ after wrapping, then groups by column. std::stable_sort
 // on that key matches a stable radix sort.
