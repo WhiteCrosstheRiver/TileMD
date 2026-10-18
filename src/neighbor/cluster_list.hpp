@@ -55,4 +55,30 @@ ClusterGrid BuildClusterGrid(const double* box, const double* x, const double* y
 // A j-cluster is kept when the periodic bounding-box distance is below `reach`.
 ClusterPairs BuildClusterPairs(const ClusterGrid& grid);
 
+enum class LjShift { None, Energy, Force };
+
+struct LjPair {
+  int type_i = 0;
+  int type_j = 0;
+  double epsilon = 1.0;
+  double sigma = 1.0;
+  double cutoff = 2.5;
+};
+
+// Full-list Lennard-Jones on the cluster pairs. Forces are stored in the input
+// atom order. `skin` widens the list; the pair cutoff is unchanged.
+struct TileForces {
+  std::vector<double> fx;
+  std::vector<double> fy;
+  std::vector<double> fz;
+  double potential_energy = 0.0;
+  double virial[6] = {};
+  int pairs_visited = 0;
+  int pairs_inside = 0;
+};
+
+TileForces ComputeTileForces(const double* box, const double* x, const double* y, const double* z,
+                             const int* type, int n, const LjPair* pairs, int npair, double skin,
+                             LjShift shift);
+
 }  // namespace tilemd

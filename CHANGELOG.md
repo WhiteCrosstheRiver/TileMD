@@ -14,3 +14,4 @@
 - M4 launch bounds and read-only position loads on the force and neighbor kernels. Block size stays 128.
 - M4 conditional graph node around the neighbor rebuild, with the early-exit kernels kept as the fallback.
 - M5 CPU cluster-pair list: x–y columns, stable z order, 8-atom clusters, bounding-box pruning.
+- M5 CPU tile force on that list, checked against the double-precision oracle.

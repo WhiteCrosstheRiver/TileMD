@@ -5,6 +5,8 @@
 #include <cmath>
 #include <vector>
 
+#include "lj_reference.hpp"
+
 namespace {
 
 bool ContainsPair(const tilemd::ClusterPairs& pairs, int ci, int cj, int shift) {
@@ -93,6 +95,30 @@ TEST(ClusterList, EveryRealAtomAppearsOnce) {
   }
   for (int count : seen) EXPECT_EQ(count, 1);
   EXPECT_EQ(static_cast<int>(grid.gid.size()) % tilemd::kClusterSize, 0);
+
+  tilemd::ref::System system;
+  system.box[0] = box[0];
+  system.box[1] = box[1];
+  system.box[2] = box[2];
+  system.shift = tilemd::ref::Shift::Force;
+  system.type = type;
+  system.x = x;
+  system.y = y;
+  system.z = z;
+  tilemd::ref::PairCoeff coeff;
+  system.pairs = {coeff};
+  const tilemd::ref::Observables oracle = tilemd::ref::Compute(system);
+  tilemd::LjPair pair;
+  const tilemd::TileForces got = tilemd::ComputeTileForces(
+      box, x.data(), y.data(), z.data(), type.data(), 40, &pair, 1, 0.3, tilemd::LjShift::Force);
+  for (int i = 0; i < 40; ++i) {
+    EXPECT_NEAR(got.fx[static_cast<size_t>(i)], oracle.fx[static_cast<size_t>(i)], 1e-9);
+    EXPECT_NEAR(got.fy[static_cast<size_t>(i)], oracle.fy[static_cast<size_t>(i)], 1e-9);
+    EXPECT_NEAR(got.fz[static_cast<size_t>(i)], oracle.fz[static_cast<size_t>(i)], 1e-9);
+  }
+  EXPECT_NEAR(got.potential_energy, oracle.potential_energy, 1e-8);
+  EXPECT_GT(got.pairs_inside, 0);
+  EXPECT_GE(got.pairs_visited, got.pairs_inside);
   for (int column = 0; column < grid.ncolumn[0] * grid.ncolumn[1]; ++column) {
     const int begin = grid.column_cluster[static_cast<size_t>(column)] * tilemd::kClusterSize;
     const int count = grid.column_ncluster[static_cast<size_t>(column)] * tilemd::kClusterSize;

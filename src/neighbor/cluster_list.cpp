@@ -240,4 +240,129 @@ ClusterPairs BuildClusterPairs(const ClusterGrid& grid) {
   return pairs;
 }
 
+namespace {
+
+constexpr int kMaxTypes = 8;
+
+struct Prepared {
+  bool defined = false;
+  double sigma2 = 0.0;
+  double eps4 = 0.0;
+  double eps24 = 0.0;
+  double rc = 0.0;
+  double rc2 = 0.0;
+  double u_shift = 0.0;
+  double s_rc = 0.0;
+};
+
+void DecodeShift(int shift, int* sx, int* sy, int* sz) {
+  *sx = shift % 3 - 1;
+  *sy = (shift / 3) % 3 - 1;
+  *sz = shift / 9 - 1;
+}
+
+}  // namespace
+
+TileForces ComputeTileForces(const double* box, const double* x, const double* y, const double* z,
+                             const int* type, int n, const LjPair* pairs, int npair, double skin,
+                             LjShift shift) {
+  if (skin < 0.0) throw std::invalid_argument("skin must be non-negative");
+  if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
+  Prepared table[kMaxTypes][kMaxTypes] = {};
+  double max_cut = 0.0;
+  for (int p = 0; p < npair; ++p) {
+    const LjPair& coeff = pairs[p];
+    if (coeff.type_i < 0 || coeff.type_j < 0 || coeff.type_i >= kMaxTypes ||
+        coeff.type_j >= kMaxTypes) {
+      throw std::invalid_argument("pair type is outside 0..7");
+    }
+    if (!(coeff.cutoff > 0.0) || !(coeff.sigma > 0.0)) {
+      throw std::invalid_argument("sigma and cutoff must be positive");
+    }
+    auto fill = [&](int ti, int tj) {
+      Prepared& row = table[ti][tj];
+      row.defined = true;
+      row.sigma2 = coeff.sigma * coeff.sigma;
+      row.eps4 = 4.0 * coeff.epsilon;
+      row.eps24 = 24.0 * coeff.epsilon;
+      row.rc = coeff.cutoff;
+      row.rc2 = coeff.cutoff * coeff.cutoff;
+      const double inv_rc2 = 1.0 / row.rc2;
+      const double sr2 = row.sigma2 * inv_rc2;
+      const double sr6 = sr2 * sr2 * sr2;
+      const double u_c = row.eps4 * sr6 * (sr6 - 1.0);
+      row.s_rc = row.eps24 * inv_rc2 * sr6 * (2.0 * sr6 - 1.0);
+      row.u_shift = (shift == LjShift::None) ? 0.0 : u_c;
+    };
+    fill(coeff.type_i, coeff.type_j);
+    if (coeff.type_i != coeff.type_j) fill(coeff.type_j, coeff.type_i);
+    max_cut = std::max(max_cut, coeff.cutoff);
+  }
+
+  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, max_cut + skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  TileForces out;
+  out.fx.assign(static_cast<size_t>(n), 0.0);
+  out.fy.assign(static_cast<size_t>(n), 0.0);
+  out.fz.assign(static_cast<size_t>(n), 0.0);
+  for (int ci = 0; ci < grid.ncluster; ++ci) {
+    for (int k = list.ci_start[static_cast<size_t>(ci)];
+         k < list.ci_start[static_cast<size_t>(ci) + 1]; ++k) {
+      const int cj = list.cj[static_cast<size_t>(k)];
+      int sx = 0;
+      int sy = 0;
+      int sz = 0;
+      DecodeShift(list.shift[static_cast<size_t>(k)], &sx, &sy, &sz);
+      for (int local_i = 0; local_i < kClusterSize; ++local_i) {
+        const int slot_i = ci * kClusterSize + local_i;
+        if (grid.type[static_cast<size_t>(slot_i)] == kMaskType) continue;
+        const int gid_i = grid.gid[static_cast<size_t>(slot_i)];
+        const int ti = grid.type[static_cast<size_t>(slot_i)];
+        const double xi = grid.x[static_cast<size_t>(slot_i)];
+        const double yi = grid.y[static_cast<size_t>(slot_i)];
+        const double zi = grid.z[static_cast<size_t>(slot_i)];
+        for (int local_j = 0; local_j < kClusterSize; ++local_j) {
+          const int slot_j = cj * kClusterSize + local_j;
+          if (grid.type[static_cast<size_t>(slot_j)] == kMaskType) continue;
+          if (ci == cj && local_i == local_j && sx == 0 && sy == 0 && sz == 0) continue;
+          ++out.pairs_visited;
+          const int tj = grid.type[static_cast<size_t>(slot_j)];
+          const Prepared& row = table[ti][tj];
+          if (!row.defined) throw std::invalid_argument("missing pair coefficient");
+          const double dx = xi - (grid.x[static_cast<size_t>(slot_j)] + sx * grid.box[0]);
+          const double dy = yi - (grid.y[static_cast<size_t>(slot_j)] + sy * grid.box[1]);
+          const double dz = zi - (grid.z[static_cast<size_t>(slot_j)] + sz * grid.box[2]);
+          const double r2 = dx * dx + dy * dy + dz * dz;
+          if (r2 >= row.rc2) continue;
+          ++out.pairs_inside;
+          const double inv_r2 = 1.0 / r2;
+          const double sr2 = row.sigma2 * inv_r2;
+          const double sr6 = sr2 * sr2 * sr2;
+          double s = row.eps24 * inv_r2 * sr6 * (2.0 * sr6 - 1.0);
+          double u = row.eps4 * sr6 * (sr6 - 1.0) - row.u_shift;
+          if (shift == LjShift::Force) {
+            const double r = std::sqrt(r2);
+            u += (r - row.rc) * row.s_rc * row.rc;
+            s -= row.s_rc * row.rc / r;
+          }
+          const double fx = s * dx;
+          const double fy = s * dy;
+          const double fz = s * dz;
+          out.fx[static_cast<size_t>(gid_i)] += fx;
+          out.fy[static_cast<size_t>(gid_i)] += fy;
+          out.fz[static_cast<size_t>(gid_i)] += fz;
+          out.potential_energy += 0.5 * u;
+          out.virial[0] += 0.5 * dx * fx;
+          out.virial[1] += 0.5 * dy * fy;
+          out.virial[2] += 0.5 * dz * fz;
+          out.virial[3] += 0.5 * dx * fy;
+          out.virial[4] += 0.5 * dx * fz;
+          out.virial[5] += 0.5 * dy * fz;
+        }
+      }
+    }
+  }
+  return out;
+}
+
 }  // namespace tilemd
