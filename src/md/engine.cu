@@ -438,10 +438,28 @@ void PermuteBuffer(T* data, T* scratch, const int* order, int n) {
 }
 
 template <typename T>
-void QueuePermute(T* data, T* scratch, const int* order, int n, const int* gate) {
-  PermuteKernel<T><<<Grid(n), kBlock>>>(data, scratch, order, n, gate);
-  CopyBackKernel<T><<<Grid(n), kBlock>>>(data, scratch, n, gate);
+void QueuePermute(T* data, T* scratch, const int* order, int n, const int* gate,
+                  cudaStream_t stream) {
+  PermuteKernel<T><<<Grid(n), kBlock, 0, stream>>>(data, scratch, order, n, gate);
+  CopyBackKernel<T><<<Grid(n), kBlock, 0, stream>>>(data, scratch, n, gate);
 }
+
+struct GraphHold {
+  cudaGraph_t graph = nullptr;
+  cudaGraphExec_t exec = nullptr;
+  cudaStream_t stream = nullptr;
+  ~GraphHold() {
+    if (exec) cudaGraphExecDestroy(exec);
+    if (graph) cudaGraphDestroy(graph);
+    if (stream) cudaStreamDestroy(stream);
+  }
+  void ResetGraph() {
+    if (exec) cudaGraphExecDestroy(exec);
+    if (graph) cudaGraphDestroy(graph);
+    exec = nullptr;
+    graph = nullptr;
+  }
+};
 
 }  // namespace
 
@@ -495,12 +513,27 @@ struct Engine::Impl {
   void* cub_temp = nullptr;
   size_t cub_bytes = 0;
   DeviceStatus* status = nullptr;
+  double* snap_x = nullptr;
+  double* snap_y = nullptr;
+  double* snap_z = nullptr;
+  double* snap_vx = nullptr;
+  double* snap_vy = nullptr;
+  double* snap_vz = nullptr;
+  int* snap_imgx = nullptr;
+  int* snap_imgy = nullptr;
+  int* snap_imgz = nullptr;
+  int* snap_type = nullptr;
+  int* snap_gid = nullptr;
 
   void Upload();
   void ClearFlags();
   void BuildCells();
   void ApplySpatialOrder();
-  void QueueRebuild();
+  void QueueRebuild(cudaStream_t stream);
+  void LaunchStep(cudaStream_t stream);
+  void Snapshot(cudaStream_t stream);
+  void RestoreSnapshot();
+  void Capture(cudaStream_t stream, int count, cudaGraph_t* graph, cudaGraphExec_t* exec);
   void ReallocList(int capacity);
   int BuildNeighbors(bool grow);
   void ComputeForce();
@@ -531,6 +564,17 @@ struct Engine::Impl {
     cudaFree(wyz);
     cudaFree(gid);
     cudaFree(slot_of_gid);
+    cudaFree(snap_x);
+    cudaFree(snap_y);
+    cudaFree(snap_z);
+    cudaFree(snap_vx);
+    cudaFree(snap_vy);
+    cudaFree(snap_vz);
+    cudaFree(snap_imgx);
+    cudaFree(snap_imgy);
+    cudaFree(snap_imgz);
+    cudaFree(snap_type);
+    cudaFree(snap_gid);
     cudaFree(keys);
     cudaFree(sorted_keys);
     cudaFree(scratch_double);
@@ -681,6 +725,17 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
     impl_->status = static_cast<DeviceStatus*>(MustMalloc(sizeof(DeviceStatus)));
     TILEMD_CHECK(cudaMemset(impl_->status, 0, sizeof(DeviceStatus)));
     TILEMD_CHECK(cudaMemset(impl_->max_nn, 0, sizeof(int)));
+    impl_->snap_x = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->snap_y = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->snap_z = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->snap_vx = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->snap_vy = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->snap_vz = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->snap_imgx = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->snap_imgy = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->snap_imgz = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->snap_type = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->snap_gid = static_cast<int*>(MustMalloc(sizeof(int) * n));
 
     std::vector<double> zeros(n, 0.0);
     const double* vx = in.vx.empty() ? zeros.data() : in.vx.data();
@@ -807,47 +862,101 @@ void Engine::Impl::ApplySpatialOrder() {
   CheckLaunch();
 }
 
-void Engine::Impl::QueueRebuild() {
+void Engine::Impl::QueueRebuild(cudaStream_t stream) {
   // The host does not read the flag. Kernels that would change atom order or
   // the list return immediately when need_rebuild is clear. CUB has no such
   // prologue, so the sort is queued every step until a conditional graph node
   // can skip it. Its output is ignored unless the flag is set.
   const int* gate = &status->need_rebuild;
-  CellKeyKernel<<<Grid(n), kBlock>>>(pos, keys, indices, n, gate);
+  CellKeyKernel<<<Grid(n), kBlock, 0, stream>>>(pos, keys, indices, n, gate);
   TILEMD_CHECK(cub::DeviceRadixSort::SortPairs(cub_temp, cub_bytes, keys, sorted_keys, indices,
-                                               sorted_indices, n));
-  QueuePermute(x, scratch_double, sorted_indices, n, gate);
-  QueuePermute(y, scratch_double, sorted_indices, n, gate);
-  QueuePermute(z, scratch_double, sorted_indices, n, gate);
-  QueuePermute(vx, scratch_double, sorted_indices, n, gate);
-  QueuePermute(vy, scratch_double, sorted_indices, n, gate);
-  QueuePermute(vz, scratch_double, sorted_indices, n, gate);
-  QueuePermute(imgx, scratch_int, sorted_indices, n, gate);
-  QueuePermute(imgy, scratch_int, sorted_indices, n, gate);
-  QueuePermute(imgz, scratch_int, sorted_indices, n, gate);
-  QueuePermute(type, scratch_int, sorted_indices, n, gate);
-  QueuePermute(gid, scratch_int, sorted_indices, n, gate);
-  QueuePermute(pos, scratch_float4, sorted_indices, n, gate);
-  QueuePermute(xref, scratch_float4, sorted_indices, n, gate);
-  QueuePermute(fx, scratch_float, sorted_indices, n, gate);
-  QueuePermute(fy, scratch_float, sorted_indices, n, gate);
-  QueuePermute(fz, scratch_float, sorted_indices, n, gate);
-  QueuePermute(energy, scratch_double, sorted_indices, n, gate);
-  QueuePermute(wxx, scratch_double, sorted_indices, n, gate);
-  QueuePermute(wyy, scratch_double, sorted_indices, n, gate);
-  QueuePermute(wzz, scratch_double, sorted_indices, n, gate);
-  QueuePermute(wxy, scratch_double, sorted_indices, n, gate);
-  QueuePermute(wxz, scratch_double, sorted_indices, n, gate);
-  QueuePermute(wyz, scratch_double, sorted_indices, n, gate);
-  FillSlotKernel<<<Grid(n), kBlock>>>(gid, slot_of_gid, n, gate);
-  FillCellStart<<<1, 1>>>(sorted_keys, cell_start, n, ncell_tot, gate);
-  IdentityKernel<<<Grid(n), kBlock>>>(sorted_indices, n, gate);
-  ZeroMaxNn<<<1, 1>>>(max_nn, gate);
-  NeighborKernel<<<Grid(n), kBlock>>>(pos, cell_start, sorted_indices, nn, nl, max_neigh, n, max_nn,
-                                      status, gate);
-  SortNeighbors<<<Grid(n), kBlock>>>(nl, nn, gid, n, gate);
-  StoreXrefIf<<<Grid(n), kBlock>>>(xref, pos, n, gate);
-  AccountRebuild<<<1, 1>>>(status);
+                                               sorted_indices, n, 0,
+                                               static_cast<int>(sizeof(int) * 8), stream));
+  QueuePermute(x, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(y, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(z, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(vx, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(vy, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(vz, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(imgx, scratch_int, sorted_indices, n, gate, stream);
+  QueuePermute(imgy, scratch_int, sorted_indices, n, gate, stream);
+  QueuePermute(imgz, scratch_int, sorted_indices, n, gate, stream);
+  QueuePermute(type, scratch_int, sorted_indices, n, gate, stream);
+  QueuePermute(gid, scratch_int, sorted_indices, n, gate, stream);
+  QueuePermute(pos, scratch_float4, sorted_indices, n, gate, stream);
+  QueuePermute(xref, scratch_float4, sorted_indices, n, gate, stream);
+  QueuePermute(fx, scratch_float, sorted_indices, n, gate, stream);
+  QueuePermute(fy, scratch_float, sorted_indices, n, gate, stream);
+  QueuePermute(fz, scratch_float, sorted_indices, n, gate, stream);
+  QueuePermute(energy, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(wxx, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(wyy, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(wzz, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(wxy, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(wxz, scratch_double, sorted_indices, n, gate, stream);
+  QueuePermute(wyz, scratch_double, sorted_indices, n, gate, stream);
+  FillSlotKernel<<<Grid(n), kBlock, 0, stream>>>(gid, slot_of_gid, n, gate);
+  FillCellStart<<<1, 1, 0, stream>>>(sorted_keys, cell_start, n, ncell_tot, gate);
+  IdentityKernel<<<Grid(n), kBlock, 0, stream>>>(sorted_indices, n, gate);
+  ZeroMaxNn<<<1, 1, 0, stream>>>(max_nn, gate);
+  NeighborKernel<<<Grid(n), kBlock, 0, stream>>>(pos, cell_start, sorted_indices, nn, nl, max_neigh,
+                                                 n, max_nn, status, gate);
+  SortNeighbors<<<Grid(n), kBlock, 0, stream>>>(nl, nn, gid, n, gate);
+  StoreXrefIf<<<Grid(n), kBlock, 0, stream>>>(xref, pos, n, gate);
+  AccountRebuild<<<1, 1, 0, stream>>>(status);
+}
+
+void Engine::Impl::LaunchStep(cudaStream_t stream) {
+  const double dt = system.dt;
+  const double inv_mass = 1.0 / system.mass;
+  KickDrift<<<Grid(n), kBlock, 0, stream>>>(x, y, z, vx, vy, vz, fx, fy, fz, imgx, imgy, imgz, n,
+                                            dt, inv_mass);
+  RefreshShadow<<<Grid(n), kBlock, 0, stream>>>(x, y, z, type, pos, n);
+  ResetDisplacement<<<1, 1, 0, stream>>>(status);
+  DispKernel<<<Grid(n), kBlock, 0, stream>>>(pos, xref, n, status);
+  DecideRebuild<<<1, 1, 0, stream>>>(status);
+  QueueRebuild(stream);
+  ForceKernel<<<Grid(n), kBlock, 0, stream>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy,
+                                              wzz, wxy, wxz, wyz, n, status);
+  Kick<<<Grid(n), kBlock, 0, stream>>>(vx, vy, vz, fx, fy, fz, n, dt, inv_mass);
+}
+
+void Engine::Impl::Snapshot(cudaStream_t stream) {
+  TILEMD_CHECK(cudaMemcpyAsync(snap_x, x, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_y, y, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_z, z, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_vx, vx, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_vy, vy, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_vz, vz, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_imgx, imgx, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_imgy, imgy, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_imgz, imgz, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_type, type, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
+  TILEMD_CHECK(cudaMemcpyAsync(snap_gid, gid, sizeof(int) * n, cudaMemcpyDeviceToDevice, stream));
+}
+
+void Engine::Impl::RestoreSnapshot() {
+  TILEMD_CHECK(cudaMemcpy(x, snap_x, sizeof(double) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(y, snap_y, sizeof(double) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(z, snap_z, sizeof(double) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(vx, snap_vx, sizeof(double) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(vy, snap_vy, sizeof(double) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(vz, snap_vz, sizeof(double) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(imgx, snap_imgx, sizeof(int) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(imgy, snap_imgy, sizeof(int) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(imgz, snap_imgz, sizeof(int) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(type, snap_type, sizeof(int) * n, cudaMemcpyDeviceToDevice));
+  TILEMD_CHECK(cudaMemcpy(gid, snap_gid, sizeof(int) * n, cudaMemcpyDeviceToDevice));
+  RefreshShadow<<<Grid(n), kBlock>>>(x, y, z, type, pos, n);
+  CheckLaunch();
+}
+
+void Engine::Impl::Capture(cudaStream_t stream, int count, cudaGraph_t* graph,
+                           cudaGraphExec_t* exec) {
+  TILEMD_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+  for (int i = 0; i < count; ++i) LaunchStep(stream);
+  TILEMD_CHECK(cudaStreamEndCapture(stream, graph));
+  TILEMD_CHECK(cudaGraphInstantiate(exec, *graph, 0));
 }
 
 void Engine::Impl::ReallocList(int capacity) {
@@ -982,36 +1091,55 @@ void Engine::Run(int steps) {
     if (overflow) throw std::runtime_error("initial neighbor list overflowed");
     impl_->ComputeForce();
   }
-  const int n = impl_->n;
-  const double dt = impl_->system.dt;
-  const double inv_mass = 1.0 / impl_->system.mass;
-  for (int step = 0; step < steps; ++step) {
-    KickDrift<<<Grid(n), kBlock>>>(impl_->x, impl_->y, impl_->z, impl_->vx, impl_->vy, impl_->vz,
-                                   impl_->fx, impl_->fy, impl_->fz, impl_->imgx, impl_->imgy,
-                                   impl_->imgz, n, dt, inv_mass);
-    RefreshShadow<<<Grid(n), kBlock>>>(impl_->x, impl_->y, impl_->z, impl_->type, impl_->pos, n);
-    ResetDisplacement<<<1, 1>>>(impl_->status);
-    DispKernel<<<Grid(n), kBlock>>>(impl_->pos, impl_->xref, n, impl_->status);
-    DecideRebuild<<<1, 1>>>(impl_->status);
-    impl_->QueueRebuild();
-    ForceKernel<<<Grid(n), kBlock>>>(impl_->x, impl_->y, impl_->z, impl_->type, impl_->nn,
-                                     impl_->nl, impl_->fx, impl_->fy, impl_->fz, impl_->energy,
-                                     impl_->wxx, impl_->wyy, impl_->wzz, impl_->wxy, impl_->wxz,
-                                     impl_->wyz, n, impl_->status);
-    Kick<<<Grid(n), kBlock>>>(impl_->vx, impl_->vy, impl_->vz, impl_->fx, impl_->fy, impl_->fz, n,
-                              dt, inv_mass);
-    // One sync keeps the launch queue bounded. The rebuild flag stays on device.
-    CheckLaunch();
+  if (steps == 0) {
+    impl_->forces_ready = true;
+    return;
+  }
+  // One captured step-group, replayed without a host sync inside the group.
+  // Status is read at segment boundaries. 50 is the default unroll in PLAN.md.
+  constexpr int kUnroll = 50;
+  constexpr int kSegment = 1000;
+  const int unroll = std::min(kUnroll, steps);
+  GraphHold graph;
+  TILEMD_CHECK(cudaStreamCreate(&graph.stream));
+  impl_->Capture(graph.stream, unroll, &graph.graph, &graph.exec);
+  int done = 0;
+  while (done < steps) {
+    const int segment = std::min(kSegment, steps - done);
+    int retries = 0;
+    while (true) {
+      impl_->Snapshot(graph.stream);
+      const int full = segment / unroll;
+      const int tail = segment % unroll;
+      for (int i = 0; i < full; ++i) TILEMD_CHECK(cudaGraphLaunch(graph.exec, graph.stream));
+      for (int i = 0; i < tail; ++i) impl_->LaunchStep(graph.stream);
+      TILEMD_CHECK(cudaStreamSynchronize(graph.stream));
+      TILEMD_CHECK(cudaGetLastError());
+      DeviceStatus finished{};
+      TILEMD_CHECK(cudaMemcpy(&finished, impl_->status, sizeof(finished), cudaMemcpyDeviceToHost));
+      if (finished.nan_detected) {
+        throw std::runtime_error("non-finite force or position during integration at step " +
+                                 std::to_string(done));
+      }
+      if (!finished.overflow) break;
+      if (++retries > 4) {
+        throw std::runtime_error("neighbor list overflowed during integration at step " +
+                                 std::to_string(done));
+      }
+      impl_->RestoreSnapshot();
+      int next = std::max(impl_->max_neigh + impl_->max_neigh / 2, impl_->max_neigh + 32);
+      impl_->ReallocList(RoundUp32(next));
+      if (impl_->BuildNeighbors(true)) {
+        throw std::runtime_error("neighbor list overflowed during integration at step " +
+                                 std::to_string(done));
+      }
+      impl_->ComputeForce();
+      graph.ResetGraph();
+      impl_->Capture(graph.stream, unroll, &graph.graph, &graph.exec);
+    }
+    done += segment;
   }
   impl_->forces_ready = true;
-  DeviceStatus finished{};
-  TILEMD_CHECK(cudaMemcpy(&finished, impl_->status, sizeof(finished), cudaMemcpyDeviceToHost));
-  if (finished.nan_detected) {
-    throw std::runtime_error("non-finite force or position during integration");
-  }
-  if (finished.overflow) {
-    throw std::runtime_error("neighbor list overflowed during integration");
-  }
 }
 
 void ScatterToGid(const double* src, const int* gid, int n, std::vector<double>& dst) {

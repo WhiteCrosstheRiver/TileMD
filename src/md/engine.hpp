@@ -47,8 +47,8 @@ struct GpuForces {
 };
 
 // Thread-per-atom neighbor list and LJ force. Rebuilds reorder atoms by a
-// stable Morton cell code. The step loop decides that rebuild on the device
-// and copies status back only when Run returns. Downloads scatter to the
+// stable Morton cell code. Run captures 50 steps in a CUDA graph and copies
+// status back at segment boundaries of 1000 steps. Downloads scatter to the
 // original global-id order.
 class Engine {
  public:
