@@ -478,11 +478,41 @@ __global__ void FinishThermo(const ThermoPartial* partial, int npartial, ThermoR
   *thermo_count = slot + 1;
 }
 
+__global__ void PublishTileRecord(const int* step, int every, int* record) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  *record = (every > 0 && *step % every == 0) ? *step : -1;
+}
+
 __global__ void FinishTileThermo(const ThermoPartial* partial, int npartial, ThermoRecord* ring,
                                  int capacity, int* thermo_count, int step, DeviceStatus* status) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
   ThermoRecord rec{};
   rec.step = step;
+  for (int b = 0; b < npartial; ++b) {
+    rec.ke += partial[b].ke;
+    rec.pe += partial[b].pe;
+    rec.wxx += partial[b].wxx;
+    rec.wyy += partial[b].wyy;
+    rec.wzz += partial[b].wzz;
+    rec.wxy += partial[b].wxy;
+    rec.wxz += partial[b].wxz;
+    rec.wyz += partial[b].wyz;
+  }
+  int slot = *thermo_count;
+  if (slot >= capacity) {
+    status->overflow = 1;
+    return;
+  }
+  ring[slot] = rec;
+  *thermo_count = slot + 1;
+}
+
+__global__ void FinishTileThermoDevice(const ThermoPartial* partial, int npartial,
+                                       ThermoRecord* ring, int capacity, int* thermo_count,
+                                       const int* record, DeviceStatus* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0 || record == nullptr || *record < 0) return;
+  ThermoRecord rec{};
+  rec.step = *record;
   for (int b = 0; b < npartial; ++b) {
     rec.ke += partial[b].ke;
     rec.pe += partial[b].pe;
@@ -699,6 +729,7 @@ struct Engine::Impl {
   bool thermo_origin_written = false;
   bool leapfrog_ready = false;
   int tile_step = 0;
+  int* tile_record = nullptr;
   bool tile_ready = false;
   int* tile_type = nullptr;
   int* tile_gid = nullptr;
@@ -764,6 +795,7 @@ struct Engine::Impl {
     cudaFree(tile_shift);
     cudaFree(tile_missing);
     cudaFree(tile_partial);
+    cudaFree(tile_record);
     cudaFree(fx);
     cudaFree(fy);
     cudaFree(fz);
@@ -1577,9 +1609,13 @@ bool Engine::Impl::CaptureFusedGraph(cudaStream_t stream, int count, float4* cur
   float4* read = cur;
   float4* write = nxt;
   for (int step = 0; step < count && ok; ++step) {
+    PublishTileRecord<<<1, 1, 0, stream>>>(step_counter, system.thermo_every, tile_record);
     LaunchFusedTileKernel(tile_ncluster, tile_type, tile_gid, tile_ci, tile_cj, tile_shift,
                           tile_missing, x, y, z, vx, vy, vz, imgx, imgy, imgz, read, write, xref,
-                          status, step_counter, system.dt, 1.0 / system.mass, nullptr, -1, stream);
+                          status, step_counter, system.dt, 1.0 / system.mass, tile_partial, -1,
+                          stream, tile_record);
+    FinishTileThermoDevice<<<1, 1, 0, stream>>>(tile_partial, tile_ncluster, thermo_ring,
+                                                kThermoRing, thermo_count, tile_record, status);
     std::swap(read, write);
   }
   cudaGraph_t built = nullptr;
@@ -1614,13 +1650,23 @@ void Engine::Impl::RunClusterTiles(int steps) {
   }
   float4* latest = pos;
   float4* other = pos_next;
-  if (!FusedGraphOk(system.rebuild_every_step, system.thermo_every)) {
+  if (!FusedGraphOk(system.rebuild_every_step)) {
     RunTileSteps(steps, latest, other);
   } else {
     int done = 0;
     while (done < steps) {
-      const int unroll = GraphUnroll(system.graph_unroll, steps - done);
+      int unroll = GraphUnroll(system.graph_unroll, steps - done);
+      if (system.thermo_every > 0) unroll = std::min(unroll, kThermoRing);
       if (TileListStale()) RebuildTileCache(latest);
+      if (tile_record == nullptr) {
+        tile_record = static_cast<int*>(MustMalloc(sizeof(int)));
+      }
+      if (system.thermo_every > 0 && tile_ncluster > tile_partial_cap) {
+        cudaFree(tile_partial);
+        tile_partial = static_cast<TileThermoPartial*>(
+            MustMalloc(sizeof(TileThermoPartial) * static_cast<size_t>(tile_ncluster)));
+        tile_partial_cap = tile_ncluster;
+      }
       const int saved_step = tile_step;
       GraphHold graph;
       TILEMD_CHECK(cudaStreamCreate(&graph.stream));
@@ -1660,6 +1706,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
           throw std::runtime_error("non-finite force or position during integration at step " +
                                    std::to_string(done));
         }
+        if (!TileListStale()) DrainDeviceThermo();
         if (TileListStale()) {
           RestoreSnapshot();
           if (n > 0) {

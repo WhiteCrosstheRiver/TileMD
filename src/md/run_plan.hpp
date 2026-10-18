@@ -19,12 +19,11 @@ inline int GraphUnroll(int requested, int steps) {
   return std::min(requested, steps);
 }
 
-// A captured fused graph replays one cluster list. Thermo is chosen on the
-// host, so an interval keeps the step-by-step loop. Rebuilding every step
-// does too: the list is built on the host.
-inline bool FusedGraphOk(bool rebuild_every_step, int thermo_every) {
-  return !rebuild_every_step && thermo_every <= 0;
-}
+// A captured fused graph replays one cluster list. Rebuilding every step keeps
+// the step-by-step loop, because that list is built on the host. Thermo is
+// decided on the device from the step counter, so an interval can stay in the
+// graph.
+inline bool FusedGraphOk(bool rebuild_every_step) { return !rebuild_every_step; }
 
 // Buffer that holds the latest positions after `steps` fused launches, when
 // launch 0 reads buffer 0 and writes buffer 1.
