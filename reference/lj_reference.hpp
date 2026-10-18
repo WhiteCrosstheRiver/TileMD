@@ -38,6 +38,13 @@ struct Observables {
   double potential_energy = 0.0;
   // xx, yy, zz, xy, xz, yz. Full-list definition, including the factor 1/2.
   double virial[6] = {};
+  // Same components, one row per atom. Their sums are `virial`.
+  std::vector<double> wxx;
+  std::vector<double> wyy;
+  std::vector<double> wzz;
+  std::vector<double> wxy;
+  std::vector<double> wxz;
+  std::vector<double> wyz;
 };
 
 int NumAtoms(const System& system);
@@ -54,6 +61,13 @@ struct ExtxyzFrame {
   std::vector<double> vx;
   std::vector<double> vy;
   std::vector<double> vz;
+  // Empty unless the frame has a `virial:R:6` column, in xx, yy, zz, xy, xz, yz order.
+  std::vector<double> wxx;
+  std::vector<double> wyy;
+  std::vector<double> wzz;
+  std::vector<double> wxy;
+  std::vector<double> wxz;
+  std::vector<double> wyz;
 };
 
 // `frame` 0 is the first frame. Properties selects the columns. `pos` and

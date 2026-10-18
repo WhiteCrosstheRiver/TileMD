@@ -10,7 +10,7 @@
 
 | Milestone | Branch | State | Gate | PR | Notes |
 |---|---|---|---|---|---|
-| M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. The Appendix D input parser reads an fcc melt, and `tilemd input.in` integrates it with the CPU reference, including extended-XYZ dumps. A dump frame reloads positions, types, and velocities. `units metal` with `eam` runs that table on the CPU pair-attention path. The GPU engine is not used for that path. GitHub remote not created (`gh` is not installed). |
+| M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. The Appendix D input parser reads an fcc melt, and `tilemd input.in` integrates it with the CPU reference, including extended-XYZ dumps. A dump frame reloads positions, types, and velocities. `dump_virial 1` adds the six per-atom virial components, and their sum is the global virial. `units metal` with `eam` runs that table on the CPU pair-attention path. The GPU engine is not used for that path. GitHub remote not created (`gh` is not installed). |
 | M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | not started | — | | |
 | M2 CPU reference oracle | `m2-cpu-reference` | in progress | G1-ref | | Local gate passed (LAMMPS 22 Jul 2025 Update 4, CPU). No GitHub PR (`gh` is not installed). |
 | M3 GPU v0 (correct, simple) | `m3-gpu-v0` | in progress | G1 | | Local T1, T2, T3, T5, T6, T7, and T8 passed on an RTX 3050 against CPU LAMMPS. T5 L1 is 0.00147. T4 is still running. No KOKKOS package and no GitHub PR (`gh` is not installed). |
@@ -680,6 +680,7 @@ timestep       0.005
 ensemble       nve                      # nve | langevin T gamma seed
 thermo_every   100
 dump_every     0                        # 0 = off
+dump_virial    0                        # 1 writes per-atom virial on dump frames
 graph_unroll   50
 run            10000
 ```

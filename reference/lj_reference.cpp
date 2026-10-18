@@ -155,6 +155,12 @@ Observables Compute(const System& system) {
   out.fy.assign(n, 0.0);
   out.fz.assign(n, 0.0);
   out.energy.assign(n, 0.0);
+  out.wxx.assign(n, 0.0);
+  out.wyy.assign(n, 0.0);
+  out.wzz.assign(n, 0.0);
+  out.wxy.assign(n, 0.0);
+  out.wxz.assign(n, 0.0);
+  out.wyz.assign(n, 0.0);
 
   for (int i = 0; i < n; ++i) {
     const int ti = system.type[i];
@@ -191,12 +197,24 @@ Observables Compute(const System& system) {
       out.fz[i] += fz;
       out.energy[i] += 0.5 * u;
       out.potential_energy += 0.5 * u;
-      out.virial[0] += 0.5 * dx * fx;
-      out.virial[1] += 0.5 * dy * fy;
-      out.virial[2] += 0.5 * dz * fz;
-      out.virial[3] += 0.5 * dx * fy;
-      out.virial[4] += 0.5 * dx * fz;
-      out.virial[5] += 0.5 * dy * fz;
+      const double wxx = 0.5 * dx * fx;
+      const double wyy = 0.5 * dy * fy;
+      const double wzz = 0.5 * dz * fz;
+      const double wxy = 0.5 * dx * fy;
+      const double wxz = 0.5 * dx * fz;
+      const double wyz = 0.5 * dy * fz;
+      out.wxx[i] += wxx;
+      out.wyy[i] += wyy;
+      out.wzz[i] += wzz;
+      out.wxy[i] += wxy;
+      out.wxz[i] += wxz;
+      out.wyz[i] += wyz;
+      out.virial[0] += wxx;
+      out.virial[1] += wyy;
+      out.virial[2] += wzz;
+      out.virial[3] += wxy;
+      out.virial[4] += wxz;
+      out.virial[5] += wyz;
     }
   }
   return out;
@@ -258,7 +276,7 @@ void WriteObservablesJson(const std::string& path, const std::string& name, cons
 
 namespace {
 
-enum class XyzField { Species, Position, Velocity, Type, Text, Number };
+enum class XyzField { Species, Position, Velocity, Type, Virial, Text, Number };
 
 struct XyzColumn {
   XyzField field = XyzField::Number;
@@ -311,6 +329,8 @@ std::vector<XyzColumn> ColumnsFromComment(const std::string& comment) {
         column.field = XyzField::Velocity;
       else if (name == "type" && count == 1)
         column.field = XyzField::Type;
+      else if (name == "virial" && count == 6)
+        column.field = XyzField::Virial;
       else
         column.field = XyzField::Number;
     } else {
@@ -345,6 +365,10 @@ void ReadAtomLine(std::istream& in, const std::vector<XyzColumn>& columns, int i
           frame->vz[static_cast<size_t>(i)];
     } else if (column.field == XyzField::Type) {
       in >> type;
+    } else if (column.field == XyzField::Virial) {
+      in >> frame->wxx[static_cast<size_t>(i)] >> frame->wyy[static_cast<size_t>(i)] >>
+          frame->wzz[static_cast<size_t>(i)] >> frame->wxy[static_cast<size_t>(i)] >>
+          frame->wxz[static_cast<size_t>(i)] >> frame->wyz[static_cast<size_t>(i)];
     } else {
       for (int k = 0; k < column.count; ++k) {
         double ignored = 0.0;
@@ -399,8 +423,10 @@ ExtxyzFrame ReadExtxyzFrame(const std::string& path, int frame) {
     }
     const std::vector<XyzColumn> columns = ColumnsFromComment(comment);
     bool has_velocity = false;
+    bool has_virial = false;
     for (const XyzColumn& column : columns) {
       if (column.field == XyzField::Velocity) has_velocity = true;
+      if (column.field == XyzField::Virial) has_virial = true;
     }
     out.system.type.resize(static_cast<size_t>(n));
     out.system.x.resize(static_cast<size_t>(n));
@@ -410,6 +436,14 @@ ExtxyzFrame ReadExtxyzFrame(const std::string& path, int frame) {
       out.vx.assign(static_cast<size_t>(n), 0.0);
       out.vy.assign(static_cast<size_t>(n), 0.0);
       out.vz.assign(static_cast<size_t>(n), 0.0);
+    }
+    if (has_virial) {
+      out.wxx.assign(static_cast<size_t>(n), 0.0);
+      out.wyy.assign(static_cast<size_t>(n), 0.0);
+      out.wzz.assign(static_cast<size_t>(n), 0.0);
+      out.wxy.assign(static_cast<size_t>(n), 0.0);
+      out.wxz.assign(static_cast<size_t>(n), 0.0);
+      out.wyz.assign(static_cast<size_t>(n), 0.0);
     }
     for (int i = 0; i < n; ++i) ReadAtomLine(in, columns, i, &out);
   }

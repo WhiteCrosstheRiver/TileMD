@@ -291,6 +291,35 @@ TEST(Input, DumpWritesAFrameOnTheRequestedSteps) {
   std::filesystem::remove(path);
 }
 
+TEST(Input, DumpVirialRoundTripsThePerAtomTensor) {
+  std::string text = kMelt;
+  const auto dump = text.find("dump_every     0");
+  text.replace(dump, std::string("dump_every     0").size(), "dump_every     1\ndump_virial    1");
+  const auto steps = text.find("run            10");
+  text.replace(steps, std::string("run            10").size(), "run            0");
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  EXPECT_EQ(input.dump_virial, 1);
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "tilemd_input_virial.extxyz";
+  std::filesystem::remove(path);
+  tilemd::RunReference(input, path.string());
+  const tilemd::ref::ExtxyzFrame frame = tilemd::ref::ReadExtxyzFrame(path.string(), 0);
+  const tilemd::ref::Observables oracle = tilemd::ref::Compute(input.system);
+  ASSERT_EQ(frame.wxx.size(), oracle.wxx.size());
+  const std::vector<double>* got[6] = {&frame.wxx, &frame.wyy, &frame.wzz,
+                                       &frame.wxy, &frame.wxz, &frame.wyz};
+  const std::vector<double>* ref[6] = {&oracle.wxx, &oracle.wyy, &oracle.wzz,
+                                       &oracle.wxy, &oracle.wxz, &oracle.wyz};
+  const int n = tilemd::ref::NumAtoms(input.system);
+  for (int i = 0; i < n; ++i) {
+    for (int k = 0; k < 6; ++k) {
+      EXPECT_NEAR((*got[k])[static_cast<size_t>(i)], (*ref[k])[static_cast<size_t>(i)], 1.0e-12);
+    }
+  }
+  std::filesystem::remove(path);
+  EXPECT_THROW(tilemd::ParseInput("dump_virial 2\n", "."), std::runtime_error);
+}
+
 TEST(Input, StructureLoadsPositions) {
   const std::filesystem::path dir = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "fixtures";
   const std::string text =

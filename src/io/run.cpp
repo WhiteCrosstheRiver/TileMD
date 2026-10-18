@@ -15,7 +15,9 @@ namespace tilemd {
 namespace {
 
 void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dynamics& state,
-                int step);
+                int step, const ref::Observables* atom_virial);
+void DumpFrame(std::ofstream& dump, const SimulationInput& input, const ref::Dynamics& state,
+               int step, const AttentionResult* force);
 
 double AtomMass(const SimulationInput& input, int atom) {
   if (input.mass_by_type.empty()) return input.mass;
@@ -123,7 +125,7 @@ std::vector<ThermoRow> IntegrateMetal(Potential& potential, const SimulationInpu
   std::vector<ThermoRow> rows;
   if (input.thermo_every > 0)
     rows.push_back(MakeRow(input, state, 0, force.potential_energy, force.virial, true));
-  if (dump) WriteFrame(dump, input, state, 0);
+  if (dump) DumpFrame(dump, input, state, 0, &force);
   for (int step = 1; step <= input.steps; ++step) {
     KickMetal(state, force, input);
     if (input.langevin && input.thermo.gamma > 0.0) {
@@ -138,7 +140,7 @@ std::vector<ThermoRow> IntegrateMetal(Potential& potential, const SimulationInpu
     if (input.thermo_every > 0 && step % input.thermo_every == 0) {
       rows.push_back(MakeRow(input, state, step, force.potential_energy, force.virial, true));
     }
-    if (dump && step % input.dump_every == 0) WriteFrame(dump, input, state, step);
+    if (dump && step % input.dump_every == 0) DumpFrame(dump, input, state, step, &force);
   }
   return rows;
 }
@@ -154,15 +156,48 @@ std::vector<ThermoRow> RunMetal(const SimulationInput& input, std::ofstream& dum
   return IntegrateMetal(potential, input, dump);
 }
 
+ref::Observables VirialView(const AttentionResult& force) {
+  ref::Observables obs;
+  obs.wxx = force.wxx;
+  obs.wyy = force.wyy;
+  obs.wzz = force.wzz;
+  obs.wxy = force.wxy;
+  obs.wxz = force.wxz;
+  obs.wyz = force.wyz;
+  return obs;
+}
+
+void DumpFrame(std::ofstream& dump, const SimulationInput& input, const ref::Dynamics& state,
+               int step, const AttentionResult* force) {
+  ref::Observables held;
+  const ref::Observables* view = nullptr;
+  if (input.dump_virial) {
+    if (force != nullptr) {
+      held = VirialView(*force);
+    } else {
+      ref::System system = input.system;
+      system.x = state.x;
+      system.y = state.y;
+      system.z = state.z;
+      held = ref::Compute(system);
+    }
+    view = &held;
+  }
+  WriteFrame(dump, input, state, step, view);
+}
+
 void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dynamics& state,
-                int step) {
+                int step, const ref::Observables* atom_virial) {
   const int n = ref::NumAtoms(input.system);
   const char* shift = "none";
   if (input.system.shift == ref::Shift::Energy) shift = "energy";
   if (input.system.shift == ref::Shift::Force) shift = "force";
+  const char* properties = atom_virial == nullptr
+                               ? "species:S:1:pos:R:3:vel:R:3:type:I:1"
+                               : "species:S:1:pos:R:3:vel:R:3:type:I:1:virial:R:6";
   out << n << "\n";
   out << "Lattice=\"" << input.system.box[0] << " 0 0 0 " << input.system.box[1] << " 0 0 0 "
-      << input.system.box[2] << "\" Properties=species:S:1:pos:R:3:vel:R:3:type:I:1 step=" << step
+      << input.system.box[2] << "\" Properties=" << properties << " step=" << step
       << " shift=" << shift << " pbc=\"T T T\"\n";
   for (int i = 0; i < n; ++i) {
     const int type = input.system.type[static_cast<size_t>(i)];
@@ -171,7 +206,14 @@ void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dyn
     out << species << " " << state.x[static_cast<size_t>(i)] << " "
         << state.y[static_cast<size_t>(i)] << " " << state.z[static_cast<size_t>(i)] << " "
         << state.vx[static_cast<size_t>(i)] << " " << state.vy[static_cast<size_t>(i)] << " "
-        << state.vz[static_cast<size_t>(i)] << " " << type << "\n";
+        << state.vz[static_cast<size_t>(i)] << " " << type;
+    if (atom_virial != nullptr) {
+      const std::size_t atom = static_cast<std::size_t>(i);
+      out << " " << atom_virial->wxx[atom] << " " << atom_virial->wyy[atom] << " "
+          << atom_virial->wzz[atom] << " " << atom_virial->wxy[atom] << " "
+          << atom_virial->wxz[atom] << " " << atom_virial->wyz[atom];
+    }
+    out << "\n";
   }
 }
 
@@ -192,7 +234,7 @@ std::vector<ThermoRow> RunReference(const SimulationInput& input, const std::str
   ref::Dynamics state = ref::MakeDynamics(system, input.vx, input.vy, input.vz);
   std::vector<ThermoRow> rows;
   if (input.thermo_every > 0) rows.push_back(Sample(input, state, 0));
-  if (dump) WriteFrame(dump, input, state, 0);
+  if (dump) DumpFrame(dump, input, state, 0, nullptr);
   for (int step = 1; step <= input.steps; ++step) {
     if (input.langevin) {
       ref::LangevinBaoabStep(system, state, input.timestep, input.mass, input.thermo,
@@ -203,7 +245,7 @@ std::vector<ThermoRow> RunReference(const SimulationInput& input, const std::str
     if (input.thermo_every > 0 && step % input.thermo_every == 0) {
       rows.push_back(Sample(input, state, step));
     }
-    if (dump && step % input.dump_every == 0) WriteFrame(dump, input, state, step);
+    if (dump && step % input.dump_every == 0) DumpFrame(dump, input, state, step, nullptr);
   }
   return rows;
 }

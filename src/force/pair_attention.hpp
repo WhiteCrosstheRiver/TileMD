@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstddef>
 #include <stdexcept>
 #include <vector>
 
@@ -23,7 +24,23 @@ struct AttentionResult {
   double potential_energy = 0.0;
   // xx, yy, zz, xy, xz, yz. Full list, including the factor 1/2.
   double virial[6] = {};
+  std::vector<double> wxx;
+  std::vector<double> wyy;
+  std::vector<double> wzz;
+  std::vector<double> wxy;
+  std::vector<double> wxz;
+  std::vector<double> wyz;
 };
+
+inline void AllocateAtomVirial(AttentionResult* out, int n) {
+  const std::size_t count = static_cast<std::size_t>(n);
+  out->wxx.assign(count, 0.0);
+  out->wyy.assign(count, 0.0);
+  out->wzz.assign(count, 0.0);
+  out->wxy.assign(count, 0.0);
+  out->wxz.assign(count, 0.0);
+  out->wyz.assign(count, 0.0);
+}
 
 // Potential:
 //   static constexpr int kNumPasses;
@@ -52,6 +69,7 @@ AttentionResult EvaluateAttention(Potential& potential, const double* box, const
   out.fy.assign(static_cast<size_t>(n), 0.0);
   out.fz.assign(static_cast<size_t>(n), 0.0);
   out.energy.assign(static_cast<size_t>(n), 0.0);
+  AllocateAtomVirial(&out, n);
 
   for (int pass = 0; pass < Potential::kNumPasses; ++pass) {
     std::vector<double> sum_x(static_cast<size_t>(n), 0.0);
@@ -85,12 +103,24 @@ AttentionResult EvaluateAttention(Potential& potential, const double* box, const
         const double fx = term.force * dx;
         const double fy = term.force * dy;
         const double fz = term.force * dz;
-        out.virial[0] += 0.5 * dx * fx;
-        out.virial[1] += 0.5 * dy * fy;
-        out.virial[2] += 0.5 * dz * fz;
-        out.virial[3] += 0.5 * dx * fy;
-        out.virial[4] += 0.5 * dx * fz;
-        out.virial[5] += 0.5 * dy * fz;
+        const double wxx = 0.5 * dx * fx;
+        const double wyy = 0.5 * dy * fy;
+        const double wzz = 0.5 * dz * fz;
+        const double wxy = 0.5 * dx * fy;
+        const double wxz = 0.5 * dx * fz;
+        const double wyz = 0.5 * dy * fz;
+        out.wxx[static_cast<size_t>(i)] += wxx;
+        out.wyy[static_cast<size_t>(i)] += wyy;
+        out.wzz[static_cast<size_t>(i)] += wzz;
+        out.wxy[static_cast<size_t>(i)] += wxy;
+        out.wxz[static_cast<size_t>(i)] += wxz;
+        out.wyz[static_cast<size_t>(i)] += wyz;
+        out.virial[0] += wxx;
+        out.virial[1] += wyy;
+        out.virial[2] += wzz;
+        out.virial[3] += wxy;
+        out.virial[4] += wxz;
+        out.virial[5] += wyz;
       }
     }
     for (int i = 0; i < n; ++i) {

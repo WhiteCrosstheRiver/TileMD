@@ -200,10 +200,10 @@ void FillVelocities(SimulationInput& input, double temperature, std::uint32_t se
 
 SimulationInput ParseInput(const std::string& text, const std::string& base_dir) {
   const std::vector<Command> commands = Lex(text);
-  const char* known[] = {"units",        "box",        "structure",    "types",
-                         "lj",           "lj_shift",   "eam",          "mass",
-                         "velocity",     "skin",       "timestep",     "ensemble",
-                         "thermo_every", "dump_every", "graph_unroll", "run"};
+  const char* known[] = {"units",        "box",      "structure",    "types",      "lj",
+                         "lj_shift",     "eam",      "mass",         "velocity",   "skin",
+                         "timestep",     "ensemble", "thermo_every", "dump_every", "dump_virial",
+                         "graph_unroll", "run"};
   for (const Command& command : commands) {
     bool match = false;
     for (const char* key : known) {
@@ -380,6 +380,13 @@ SimulationInput ParseInput(const std::string& text, const std::string& base_dir)
     RequireCount(*dump, 1);
     input.dump_every = Integer(*dump, 0);
     if (input.dump_every < 0) throw std::runtime_error("dump_every must be non-negative");
+  }
+  if (const Command* virial = Find(commands, "dump_virial")) {
+    RequireCount(*virial, 1);
+    input.dump_virial = Integer(*virial, 0);
+    if (input.dump_virial != 0 && input.dump_virial != 1) {
+      throw std::runtime_error("dump_virial must be 0 or 1");
+    }
   }
   if (const Command* graph = Find(commands, "graph_unroll")) {
     RequireCount(*graph, 1);

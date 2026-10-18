@@ -222,3 +222,20 @@ TEST(LjReference, ExtxyzVelocityColumnIsNotTheType) {
   EXPECT_THROW(tilemd::ref::ReadExtxyzFrame(path.string(), 2), std::runtime_error);
   std::filesystem::remove(path);
 }
+
+TEST(Reference, PerAtomVirialSumsToTheGlobalTensor) {
+  const System system = PairAt(1.2, Shift::None);
+  const Observables obs = Compute(system);
+  ASSERT_EQ(obs.wxx.size(), 2u);
+  const std::vector<double>* column[6] = {&obs.wxx, &obs.wyy, &obs.wzz,
+                                          &obs.wxy, &obs.wxz, &obs.wyz};
+  double sum[6] = {};
+  for (int i = 0; i < 2; ++i) {
+    for (int k = 0; k < 6; ++k) sum[k] += (*column[k])[static_cast<size_t>(i)];
+  }
+  for (int k = 0; k < 6; ++k) EXPECT_NEAR(sum[k], obs.virial[k], 1.0e-12);
+  EXPECT_NEAR(obs.wxx[0], obs.wxx[1], 1.0e-12);
+  EXPECT_GT(std::abs(obs.virial[0]), 1.0e-6);
+  EXPECT_NEAR(obs.wxy[0], 0.0, 1.0e-12);
+  EXPECT_NEAR(obs.wyy[0], 0.0, 1.0e-12);
+}

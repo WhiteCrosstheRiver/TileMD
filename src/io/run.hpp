@@ -25,7 +25,8 @@ struct ThermoRow {
 // that element's mass. Langevin is BAOAB; zero friction is the metal Verlet step.
 // Samples step 0 and every `thermo_every` steps. `thermo_every == 0`
 // samples nothing. When `dump_every > 0` and `dump_path` is not empty, those steps
-// are appended as extended-XYZ frames with positions and velocities.
+// are appended as extended-XYZ frames with positions and velocities. `dump_virial`
+// 1 adds the six per-atom virial components on those frames.
 std::vector<ThermoRow> RunReference(const SimulationInput& input,
                                     const std::string& dump_path = "");
 

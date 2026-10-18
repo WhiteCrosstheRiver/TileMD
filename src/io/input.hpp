@@ -32,6 +32,7 @@ struct SimulationInput {
   ref::Langevin thermo;
   int thermo_every = 0;
   int dump_every = 0;
+  int dump_virial = 0;
   int graph_unroll = 50;
   int steps = 0;
 };

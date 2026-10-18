@@ -93,6 +93,17 @@ void ExpectLj(const std::string& name, bool tiles) {
   for (int k = 0; k < 6; ++k) {
     EXPECT_NEAR(got.virial[k], oracle.virial[k], 1.0e-9 * virial_scale) << name << " virial " << k;
   }
+  const std::vector<double>* got_col[6] = {&got.wxx, &got.wyy, &got.wzz,
+                                           &got.wxy, &got.wxz, &got.wyz};
+  const std::vector<double>* ref_col[6] = {&oracle.wxx, &oracle.wyy, &oracle.wzz,
+                                           &oracle.wxy, &oracle.wxz, &oracle.wyz};
+  for (int i = 0; i < n; ++i) {
+    for (int k = 0; k < 6; ++k) {
+      EXPECT_NEAR((*got_col[k])[static_cast<size_t>(i)], (*ref_col[k])[static_cast<size_t>(i)],
+                  1.0e-9 * virial_scale)
+          << name << " atom " << i << " virial " << k;
+    }
+  }
 }
 
 // Lennard-Jones through the shared warp-lane walk.
@@ -161,6 +172,17 @@ TEST(PairAttention, WarpLaneWalkMatchesTheOracle) {
     for (int k = 0; k < 6; ++k) {
       EXPECT_NEAR(got.virial[k], oracle.virial[k], 1.0e-9 * virial_scale)
           << name << " virial " << k;
+    }
+    const std::vector<double>* got_col[6] = {&got.wxx, &got.wyy, &got.wzz,
+                                             &got.wxy, &got.wxz, &got.wyz};
+    const std::vector<double>* ref_col[6] = {&oracle.wxx, &oracle.wyy, &oracle.wzz,
+                                             &oracle.wxy, &oracle.wxz, &oracle.wyz};
+    for (int i = 0; i < n; ++i) {
+      for (int k = 0; k < 6; ++k) {
+        EXPECT_NEAR((*got_col[k])[static_cast<size_t>(i)], (*ref_col[k])[static_cast<size_t>(i)],
+                    1.0e-9 * virial_scale)
+            << name << " atom " << i << " virial " << k;
+      }
     }
   }
 }
