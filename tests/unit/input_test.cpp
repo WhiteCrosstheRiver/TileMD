@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "force/eam.hpp"
 #include "io/run.hpp"
 
 namespace {
@@ -560,4 +561,77 @@ TEST(Input, SetflDriftAgreesBeforeTheGasSeparates) {
   EXPECT_LT(early_gap, 1.0e-12);
   std::cout << std::scientific << std::setprecision(8) << "setfl drift early gap " << early_gap
             << " max gap " << max_gap << "\n";
+}
+
+TEST(Input, SetflVelocityUsesElementMass) {
+  const std::string table = InstalledCuNiTable();
+  if (table.empty()) GTEST_SKIP() << "CuNi setfl table is not available";
+  const std::filesystem::path xyz =
+      std::filesystem::temp_directory_path() / "tilemd_cuni_velocity.extxyz";
+  {
+    std::ofstream out(xyz);
+    out << "2\n";
+    out << "Lattice=\"20 0 0 0 20 0 0 0 20\" Properties=species:S:1:pos:R:3:type:I:1 "
+           "shift=none pbc=\"T T T\"\n";
+    out << "A 1 2 3 0\n";
+    out << "B 4 5 6 1\n";
+  }
+  const std::string text = "units metal\nstructure " + xyz.string() + "\neam " + table +
+                           "\nvelocity 300 seed 7\nrun 0\n";
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  ASSERT_EQ(input.mass_by_type.size(), 2u);
+  const double thermal = 300.0 * tilemd::kMetalBoltz * tilemd::kMetalFtm2v;
+  double vx[2];
+  double vy[2];
+  double vz[2];
+  double momentum_x = 0.0;
+  double momentum_y = 0.0;
+  double momentum_z = 0.0;
+  double total_mass = 0.0;
+  for (int i = 0; i < 2; ++i) {
+    const double mass =
+        input.mass_by_type[static_cast<size_t>(input.system.type[static_cast<size_t>(i)])];
+    const double scale = std::sqrt(thermal / mass);
+    const tilemd::ref::PhiloxWord word =
+        tilemd::ref::Philox4x32_10(static_cast<std::uint32_t>(i), 0u, 0u, 0u, 7u, 0u);
+    const std::uint32_t bits[4] = {word.w[0], word.w[1], word.w[2], word.w[3]};
+    double normal[3] = {};
+    for (int pair = 0; pair < 2; ++pair) {
+      const double u1 = (static_cast<double>(bits[2 * pair]) + 0.5) * (1.0 / 4294967296.0);
+      const double u2 = (static_cast<double>(bits[2 * pair + 1]) + 0.5) * (1.0 / 4294967296.0);
+      const double radius = std::sqrt(-2.0 * std::log(u1));
+      const double angle = 6.28318530717958647692 * u2;
+      if (pair == 0) {
+        normal[0] = radius * std::cos(angle);
+        normal[1] = radius * std::sin(angle);
+      } else {
+        normal[2] = radius * std::cos(angle);
+      }
+    }
+    vx[i] = scale * normal[0];
+    vy[i] = scale * normal[1];
+    vz[i] = scale * normal[2];
+    momentum_x += mass * vx[i];
+    momentum_y += mass * vy[i];
+    momentum_z += mass * vz[i];
+    total_mass += mass;
+  }
+  const double shift_x = momentum_x / total_mass;
+  const double shift_y = momentum_y / total_mass;
+  const double shift_z = momentum_z / total_mass;
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_DOUBLE_EQ(input.vx[static_cast<size_t>(i)], vx[i] - shift_x);
+    EXPECT_DOUBLE_EQ(input.vy[static_cast<size_t>(i)], vy[i] - shift_y);
+    EXPECT_DOUBLE_EQ(input.vz[static_cast<size_t>(i)], vz[i] - shift_z);
+  }
+  const double ni = input.mass_by_type[0];
+  const double cu = input.mass_by_type[1];
+  const double px = ni * input.vx[0] + cu * input.vx[1];
+  const double py = ni * input.vy[0] + cu * input.vy[1];
+  const double pz = ni * input.vz[0] + cu * input.vz[1];
+  EXPECT_LT(std::sqrt(px * px + py * py + pz * pz), 1.0e-12);
+  const double lj_scale = std::sqrt(300.0 / ni);
+  const double metal_scale = std::sqrt(thermal / ni);
+  EXPECT_GT(std::abs(lj_scale - metal_scale) / metal_scale, 0.05);
+  std::filesystem::remove(xyz);
 }

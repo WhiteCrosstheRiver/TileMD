@@ -10,6 +10,8 @@ namespace tilemd {
 
 // One stage-1 run described by the Appendix D key-value file. Positions come
 // from `box fcc` or `structure`. `velocity` draws a zero-momentum Gaussian.
+// Lennard-Jones uses variance `T/m`. Metal units use `k_B T / (m mvv2e)` and,
+// for a setfl file, each element's mass.
 // Without that line, velocities come from the structure file when it has a
 // vel column, and are zero otherwise. `eam` names a funcfl or setfl file and
 // selects metal units. `mass` is the single mass, or the mass of element 0

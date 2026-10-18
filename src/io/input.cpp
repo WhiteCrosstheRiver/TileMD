@@ -118,6 +118,12 @@ bool LooksLikeSetfl(const std::string& path) {
   return end == name.c_str() || *end != '\0';
 }
 
+double AtomMass(const SimulationInput& input, int atom) {
+  if (input.mass_by_type.empty()) return input.mass;
+  const int type = input.system.type.at(static_cast<size_t>(atom));
+  return input.mass_by_type.at(static_cast<size_t>(type));
+}
+
 void FillVelocities(SimulationInput& input, double temperature, std::uint32_t seed) {
   if (!(temperature >= 0.0)) throw std::runtime_error("temperature must be non-negative");
   const int n = ref::NumAtoms(input.system);
@@ -125,8 +131,11 @@ void FillVelocities(SimulationInput& input, double temperature, std::uint32_t se
   input.vx.assign(static_cast<size_t>(n), 0.0);
   input.vy.assign(static_cast<size_t>(n), 0.0);
   input.vz.assign(static_cast<size_t>(n), 0.0);
-  const double scale = std::sqrt(temperature / input.mass);
+  const double thermal = input.metal ? temperature * kMetalBoltz * kMetalFtm2v : temperature;
   for (int i = 0; i < n; ++i) {
+    const double mass = AtomMass(input, i);
+    if (!(mass > 0.0)) throw std::runtime_error("mass must be positive");
+    const double scale = std::sqrt(thermal / mass);
     const ref::PhiloxWord word =
         ref::Philox4x32_10(static_cast<std::uint32_t>(i), 0u, 0u, 0u, seed, 0u);
     const std::uint32_t bits[4] = {word.w[0], word.w[1], word.w[2], word.w[3]};
@@ -147,21 +156,43 @@ void FillVelocities(SimulationInput& input, double temperature, std::uint32_t se
     input.vy[static_cast<size_t>(i)] = scale * normal[1];
     input.vz[static_cast<size_t>(i)] = scale * normal[2];
   }
-  double mean_x = 0.0;
-  double mean_y = 0.0;
-  double mean_z = 0.0;
-  for (int i = 0; i < n; ++i) {
-    mean_x += input.vx[static_cast<size_t>(i)];
-    mean_y += input.vy[static_cast<size_t>(i)];
-    mean_z += input.vz[static_cast<size_t>(i)];
+  if (!input.metal) {
+    double mean_x = 0.0;
+    double mean_y = 0.0;
+    double mean_z = 0.0;
+    for (int i = 0; i < n; ++i) {
+      mean_x += input.vx[static_cast<size_t>(i)];
+      mean_y += input.vy[static_cast<size_t>(i)];
+      mean_z += input.vz[static_cast<size_t>(i)];
+    }
+    mean_x /= static_cast<double>(n);
+    mean_y /= static_cast<double>(n);
+    mean_z /= static_cast<double>(n);
+    for (int i = 0; i < n; ++i) {
+      input.vx[static_cast<size_t>(i)] -= mean_x;
+      input.vy[static_cast<size_t>(i)] -= mean_y;
+      input.vz[static_cast<size_t>(i)] -= mean_z;
+    }
+    return;
   }
-  mean_x /= static_cast<double>(n);
-  mean_y /= static_cast<double>(n);
-  mean_z /= static_cast<double>(n);
+  double momentum_x = 0.0;
+  double momentum_y = 0.0;
+  double momentum_z = 0.0;
+  double total_mass = 0.0;
   for (int i = 0; i < n; ++i) {
-    input.vx[static_cast<size_t>(i)] -= mean_x;
-    input.vy[static_cast<size_t>(i)] -= mean_y;
-    input.vz[static_cast<size_t>(i)] -= mean_z;
+    const double mass = AtomMass(input, i);
+    momentum_x += mass * input.vx[static_cast<size_t>(i)];
+    momentum_y += mass * input.vy[static_cast<size_t>(i)];
+    momentum_z += mass * input.vz[static_cast<size_t>(i)];
+    total_mass += mass;
+  }
+  const double shift_x = momentum_x / total_mass;
+  const double shift_y = momentum_y / total_mass;
+  const double shift_z = momentum_z / total_mass;
+  for (int i = 0; i < n; ++i) {
+    input.vx[static_cast<size_t>(i)] -= shift_x;
+    input.vy[static_cast<size_t>(i)] -= shift_y;
+    input.vz[static_cast<size_t>(i)] -= shift_z;
   }
 }
 
