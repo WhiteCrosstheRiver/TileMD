@@ -711,6 +711,8 @@ std::uint32_t MulHi(std::uint32_t a, std::uint32_t b, std::uint32_t* lo) {
   return static_cast<std::uint32_t>(product >> 32);
 }
 
+}  // namespace
+
 void StandardNormals(std::uint32_t seed, std::uint64_t step, int gid, double out[3]) {
   const PhiloxWord word =
       Philox4x32_10(static_cast<std::uint32_t>(gid), static_cast<std::uint32_t>(step),
@@ -729,8 +731,6 @@ void StandardNormals(std::uint32_t seed, std::uint64_t step, int gid, double out
   out[1] = normal[1];
   out[2] = normal[2];
 }
-
-}  // namespace
 
 PhiloxWord Philox4x32_10(std::uint32_t c0, std::uint32_t c1, std::uint32_t c2, std::uint32_t c3,
                          std::uint32_t k0, std::uint32_t k1) {

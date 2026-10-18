@@ -111,6 +111,10 @@ struct PhiloxWord {
 PhiloxWord Philox4x32_10(std::uint32_t c0, std::uint32_t c1, std::uint32_t c2, std::uint32_t c3,
                          std::uint32_t k0, std::uint32_t k1);
 
+// Three standard normals from one Philox word. Counter (gid, step low, step high, 0),
+// key (seed, 0). The fourth normal is discarded.
+void StandardNormals(std::uint32_t seed, std::uint64_t step, int gid, double out[3]);
+
 // BAOAB Langevin on the velocity-Verlet state. gamma == 0 calls VelocityVerletStep.
 // The Ornstein–Uhlenbeck draw is three standard normals from one Philox word.
 // Counter is (gid, step low, step high, 0) and the key is (seed, 0).

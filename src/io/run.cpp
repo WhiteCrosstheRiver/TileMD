@@ -81,6 +81,38 @@ AttentionResult MetalForces(Potential& potential, const SimulationInput& input,
                                 state.z.data(), input.system.type.data(), n, input.skin);
 }
 
+void DriftMetal(ref::Dynamics& state, const SimulationInput& input, double dt) {
+  const int n = static_cast<int>(state.x.size());
+  for (int i = 0; i < n; ++i) {
+    state.x[static_cast<size_t>(i)] =
+        WrapMetal(state.x[static_cast<size_t>(i)] + dt * state.vx[static_cast<size_t>(i)],
+                  input.system.box[0], &state.imgx[static_cast<size_t>(i)]);
+    state.y[static_cast<size_t>(i)] =
+        WrapMetal(state.y[static_cast<size_t>(i)] + dt * state.vy[static_cast<size_t>(i)],
+                  input.system.box[1], &state.imgy[static_cast<size_t>(i)]);
+    state.z[static_cast<size_t>(i)] =
+        WrapMetal(state.z[static_cast<size_t>(i)] + dt * state.vz[static_cast<size_t>(i)],
+                  input.system.box[2], &state.imgz[static_cast<size_t>(i)]);
+  }
+}
+
+void OrnsteinUhlenbeckMetal(ref::Dynamics& state, const SimulationInput& input,
+                            std::uint64_t step) {
+  const int n = static_cast<int>(state.x.size());
+  const double decay = std::exp(-input.thermo.gamma * input.timestep);
+  const double span = 1.0 - decay * decay;
+  for (int i = 0; i < n; ++i) {
+    const double mass = AtomMass(input, i);
+    const double noise =
+        std::sqrt(input.thermo.temperature * kMetalBoltz * kMetalFtm2v * span / mass);
+    double draw[3] = {};
+    if (noise > 0.0) ref::StandardNormals(input.thermo.seed, step, i, draw);
+    state.vx[static_cast<size_t>(i)] = decay * state.vx[static_cast<size_t>(i)] + noise * draw[0];
+    state.vy[static_cast<size_t>(i)] = decay * state.vy[static_cast<size_t>(i)] + noise * draw[1];
+    state.vz[static_cast<size_t>(i)] = decay * state.vz[static_cast<size_t>(i)] + noise * draw[2];
+  }
+}
+
 void KickMetal(ref::Dynamics& state, const AttentionResult& force, const SimulationInput& input) {
   const int n = static_cast<int>(state.x.size());
   const double scale = 0.5 * input.timestep * kMetalFtm2v;
@@ -104,17 +136,12 @@ std::vector<ThermoRow> IntegrateMetal(Potential& potential, const SimulationInpu
   if (dump) WriteFrame(dump, input, state, 0);
   for (int step = 1; step <= input.steps; ++step) {
     KickMetal(state, force, input);
-    const int n = ref::NumAtoms(input.system);
-    for (int i = 0; i < n; ++i) {
-      state.x[static_cast<size_t>(i)] = WrapMetal(
-          state.x[static_cast<size_t>(i)] + input.timestep * state.vx[static_cast<size_t>(i)],
-          input.system.box[0], &state.imgx[static_cast<size_t>(i)]);
-      state.y[static_cast<size_t>(i)] = WrapMetal(
-          state.y[static_cast<size_t>(i)] + input.timestep * state.vy[static_cast<size_t>(i)],
-          input.system.box[1], &state.imgy[static_cast<size_t>(i)]);
-      state.z[static_cast<size_t>(i)] = WrapMetal(
-          state.z[static_cast<size_t>(i)] + input.timestep * state.vz[static_cast<size_t>(i)],
-          input.system.box[2], &state.imgz[static_cast<size_t>(i)]);
+    if (input.langevin && input.thermo.gamma > 0.0) {
+      DriftMetal(state, input, 0.5 * input.timestep);
+      OrnsteinUhlenbeckMetal(state, input, static_cast<std::uint64_t>(step - 1));
+      DriftMetal(state, input, 0.5 * input.timestep);
+    } else {
+      DriftMetal(state, input, input.timestep);
     }
     force = MetalForces(potential, input, state);
     KickMetal(state, force, input);
@@ -127,7 +154,6 @@ std::vector<ThermoRow> IntegrateMetal(Potential& potential, const SimulationInpu
 }
 
 std::vector<ThermoRow> RunMetal(const SimulationInput& input, std::ofstream& dump) {
-  if (input.langevin) throw std::runtime_error("langevin is not available for an eam run");
   if (input.setfl) {
     EamSetfl potential(input.eam_path);
     const int n = ref::NumAtoms(input.system);

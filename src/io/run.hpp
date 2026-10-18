@@ -22,7 +22,7 @@ struct ThermoRow {
 // Integrates `input.steps` with velocity Verlet, or BAOAB when `langevin` is set.
 // An `eam` file uses the cluster-pair walk and the metal-unit factor
 // `kMetalFtm2v`. The skin widens that list. A setfl file kicks each atom with
-// that element's mass.
+// that element's mass. Langevin is BAOAB; zero friction is the metal Verlet step.
 // Samples step 0 and every `thermo_every` steps. `thermo_every == 0`
 // samples nothing. When `dump_every > 0` and `dump_path` is not empty, those steps
 // are appended as extended-XYZ frames with positions and velocities.

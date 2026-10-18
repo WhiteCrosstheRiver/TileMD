@@ -635,3 +635,74 @@ TEST(Input, SetflVelocityUsesElementMass) {
   EXPECT_GT(std::abs(lj_scale - metal_scale) / metal_scale, 0.05);
   std::filesystem::remove(xyz);
 }
+
+std::filesystem::path WriteTwoCopperAtoms(const std::filesystem::path& xyz) {
+  std::ofstream out(xyz);
+  out.setf(std::ios::scientific);
+  out.precision(17);
+  out << "2\n";
+  out << "Lattice=\"30 0 0 0 30 0 0 0 30\" Properties=species:S:1:pos:R:3:vel:R:3:type:I:1 "
+         "shift=none pbc=\"T T T\"\n";
+  out << "A 1 1 1 1 0 0 0\n";
+  out << "A 12 1 1 -0.5 0.2 0 0\n";
+  return xyz;
+}
+
+TEST(Input, MetalLangevinZeroFrictionMatchesNve) {
+  const std::filesystem::path table =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "Cu_u3.eam";
+  const std::filesystem::path xyz =
+      std::filesystem::temp_directory_path() / "tilemd_metal_langevin.extxyz";
+  WriteTwoCopperAtoms(xyz);
+  const std::string body = "units metal\nstructure " + xyz.string() + "\neam " + table.string() +
+                           "\ntimestep 0.001\nthermo_every 20\ndump_every 20\n";
+  const std::filesystem::path nve_dump =
+      std::filesystem::temp_directory_path() / "tilemd_metal_nve.dump.extxyz";
+  const std::filesystem::path lan_dump =
+      std::filesystem::temp_directory_path() / "tilemd_metal_lan.dump.extxyz";
+  std::filesystem::remove(nve_dump);
+  std::filesystem::remove(lan_dump);
+  const tilemd::SimulationInput nve = tilemd::ParseInput(body + "run 20\n", ".");
+  const tilemd::SimulationInput lan =
+      tilemd::ParseInput(body + "ensemble langevin 1 0 3\nrun 20\n", ".");
+  tilemd::RunReference(nve, nve_dump.string());
+  tilemd::RunReference(lan, lan_dump.string());
+  const tilemd::ref::ExtxyzFrame left = tilemd::ref::ReadExtxyzFrame(nve_dump.string(), 1);
+  const tilemd::ref::ExtxyzFrame right = tilemd::ref::ReadExtxyzFrame(lan_dump.string(), 1);
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_DOUBLE_EQ(left.system.x[static_cast<size_t>(i)], right.system.x[static_cast<size_t>(i)]);
+    EXPECT_DOUBLE_EQ(left.system.y[static_cast<size_t>(i)], right.system.y[static_cast<size_t>(i)]);
+    EXPECT_DOUBLE_EQ(left.system.z[static_cast<size_t>(i)], right.system.z[static_cast<size_t>(i)]);
+    EXPECT_DOUBLE_EQ(left.vx[static_cast<size_t>(i)], right.vx[static_cast<size_t>(i)]);
+    EXPECT_DOUBLE_EQ(left.vy[static_cast<size_t>(i)], right.vy[static_cast<size_t>(i)]);
+    EXPECT_DOUBLE_EQ(left.vz[static_cast<size_t>(i)], right.vz[static_cast<size_t>(i)]);
+  }
+  std::filesystem::remove(xyz);
+  std::filesystem::remove(nve_dump);
+  std::filesystem::remove(lan_dump);
+}
+
+TEST(Input, MetalLangevinZeroTemperatureDamps) {
+  const std::filesystem::path table =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "Cu_u3.eam";
+  const std::filesystem::path xyz =
+      std::filesystem::temp_directory_path() / "tilemd_metal_cold.extxyz";
+  WriteTwoCopperAtoms(xyz);
+  const std::filesystem::path dump =
+      std::filesystem::temp_directory_path() / "tilemd_metal_cold.dump.extxyz";
+  std::filesystem::remove(dump);
+  const std::string text = "units metal\nstructure " + xyz.string() + "\neam " + table.string() +
+                           "\ntimestep 0.001\nensemble langevin 0 2 3\ndump_every 100\nrun 100\n";
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  tilemd::RunReference(input, dump.string());
+  const tilemd::ref::ExtxyzFrame later = tilemd::ref::ReadExtxyzFrame(dump.string(), 1);
+  const double decay = std::exp(-0.2);
+  EXPECT_NEAR(later.vx[0], decay * 1.0, 1.0e-12);
+  EXPECT_NEAR(later.vy[0], 0.0, 1.0e-12);
+  EXPECT_NEAR(later.vz[0], 0.0, 1.0e-12);
+  EXPECT_NEAR(later.vx[1], decay * -0.5, 1.0e-12);
+  EXPECT_NEAR(later.vy[1], decay * 0.2, 1.0e-12);
+  EXPECT_NEAR(later.vz[1], 0.0, 1.0e-12);
+  std::filesystem::remove(xyz);
+  std::filesystem::remove(dump);
+}
