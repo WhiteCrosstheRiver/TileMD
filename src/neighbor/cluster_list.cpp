@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace tilemd {
 namespace {
@@ -15,20 +16,6 @@ struct Slot {
   int type = 0;
   int gid = -1;
 };
-
-double Wrap(double x, double length) {
-  double y = x - std::floor(x / length) * length;
-  if (y >= length) y = 0.0;
-  if (y < 0.0) y += length;
-  return y;
-}
-
-int ColumnIndex(double x, double edge, int ncolumn) {
-  int i = static_cast<int>(std::floor(x / edge));
-  if (i < 0) i = 0;
-  if (i >= ncolumn) i = ncolumn - 1;
-  return i;
-}
 
 }  // namespace
 
@@ -48,21 +35,61 @@ ClusterShape ChooseClusterColumns(int n, const double* box, int nx, int ny) {
   return shape;
 }
 
-namespace {
-
-double AxisGap(double a_lo, double a_hi, double b_lo, double b_hi) {
-  if (a_hi < b_lo) return b_lo - a_hi;
-  if (b_hi < a_lo) return a_lo - b_hi;
-  return 0.0;
+ClusterSlots SlotsInDeviceOrder(const double* box, const double* x, const double* y,
+                                const double* z, const int* type, int n, int nx, int ny) {
+  ClusterSlots out;
+  if (n <= 0) return out;
+  const ClusterShape shape = ChooseClusterColumns(n, box, nx, ny);
+  struct Item {
+    unsigned long long zkey = 0;
+    int column = 0;
+    int index = 0;
+  };
+  std::vector<Item> items(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    const double wx = WrapCoord(x[i], box[0]);
+    const double wy = WrapCoord(y[i], box[1]);
+    const double wz = WrapCoord(z[i], box[2]);
+    items[static_cast<size_t>(i)].zkey = OrderedZ(wz);
+    const int ix = ColumnIndex(wx, shape.edge_x, shape.nx);
+    const int iy = ColumnIndex(wy, shape.edge_y, shape.ny);
+    items[static_cast<size_t>(i)].column = ix + shape.nx * iy;
+    items[static_cast<size_t>(i)].index = i;
+  }
+  std::stable_sort(items.begin(), items.end(),
+                   [](const Item& a, const Item& b) { return a.zkey < b.zkey; });
+  std::stable_sort(items.begin(), items.end(),
+                   [](const Item& a, const Item& b) { return a.column < b.column; });
+  const int ncolumn = shape.nx * shape.ny;
+  std::vector<int> counts(static_cast<size_t>(ncolumn), 0);
+  for (const Item& item : items) ++counts[static_cast<size_t>(item.column)];
+  int sorted_at = 0;
+  int cluster_cursor = 0;
+  for (int column = 0; column < ncolumn; ++column) {
+    const int count = counts[static_cast<size_t>(column)];
+    const int nclus = count == 0 ? 0 : (count + kClusterSize - 1) / kClusterSize;
+    for (int a = 0; a < count; ++a) {
+      const int atom = items[static_cast<size_t>(sorted_at++)].index;
+      out.type.push_back(type[atom]);
+      out.gid.push_back(atom);
+    }
+    for (int pad = count; pad < nclus * kClusterSize; ++pad) {
+      out.type.push_back(kMaskType);
+      out.gid.push_back(-1);
+    }
+    cluster_cursor += nclus;
+  }
+  out.ncluster = cluster_cursor;
+  return out;
 }
+
+namespace {
 
 bool EmptyBox(const ClusterGrid& grid, int cluster) {
   return grid.lo_x[cluster] > grid.hi_x[cluster];
 }
 
 }  // namespace
-
-int ShiftIndex(int sx, int sy, int sz) { return (sx + 1) + 3 * ((sy + 1) + 3 * (sz + 1)); }
 
 ClusterGrid BuildClusterGrid(const double* box, const double* x, const double* y, const double* z,
                              const int* type, int n, double reach, int nx, int ny) {
@@ -87,9 +114,9 @@ ClusterGrid BuildClusterGrid(const double* box, const double* x, const double* y
   std::vector<std::vector<Slot>> columns(static_cast<size_t>(ncolumn));
   for (int i = 0; i < n; ++i) {
     Slot slot;
-    slot.x = Wrap(x[i], box[0]);
-    slot.y = Wrap(y[i], box[1]);
-    slot.z = Wrap(z[i], box[2]);
+    slot.x = WrapCoord(x[i], box[0]);
+    slot.y = WrapCoord(y[i], box[1]);
+    slot.z = WrapCoord(z[i], box[2]);
     slot.type = type[i];
     slot.gid = i;
     const int ix = ColumnIndex(slot.x, grid.edge[0], grid.ncolumn[0]);

@@ -47,6 +47,70 @@ TEST(ClusterList, ColumnChoiceMatchesTheGrid) {
   EXPECT_DOUBLE_EQ(grid.edge[1], shape.edge_y);
 }
 
+namespace {
+
+void ExpectDeviceOrder(const double* box, const double* x, const double* y, const double* z,
+                       const int* type, int n, int nx = 0, int ny = 0) {
+  const tilemd::ClusterGrid grid = tilemd::BuildClusterGrid(box, x, y, z, type, n, 1.0, nx, ny);
+  const tilemd::ClusterSlots slots = tilemd::SlotsInDeviceOrder(box, x, y, z, type, n, nx, ny);
+  EXPECT_EQ(slots.ncluster, grid.ncluster);
+  EXPECT_EQ(slots.type, grid.type);
+  EXPECT_EQ(slots.gid, grid.gid);
+}
+
+}  // namespace
+
+TEST(ClusterList, DeviceSortKeyMatchesTheHostGrid) {
+  const double box[3] = {10.0, 10.0, 10.0};
+  const int type3[3] = {0, 1, 2};
+  const double same_x[3] = {1.0, 1.2, 1.4};
+  const double same_y[3] = {1.0, 1.0, 1.0};
+  const double same_z[3] = {2.0, 2.0, 4.0};
+  ExpectDeviceOrder(box, same_x, same_y, same_z, type3, 3);
+
+  const int type2[2] = {0, 1};
+  const double wrap_x[2] = {1.0, 1.0};
+  const double wrap_y[2] = {1.0, 1.0};
+  const double wrap_z[2] = {-1.0, 1.0};
+  ExpectDeviceOrder(box, wrap_x, wrap_y, wrap_z, type2, 2);
+  const tilemd::ClusterSlots wrapped =
+      tilemd::SlotsInDeviceOrder(box, wrap_x, wrap_y, wrap_z, type2, 2);
+  ASSERT_GE(wrapped.gid.size(), 2u);
+  EXPECT_EQ(wrapped.gid[0], 1);
+  EXPECT_EQ(wrapped.gid[1], 0);
+
+  const double neg0 = -0.0;
+  const double pos0 = 0.0;
+  const double zero_x[3] = {1.0, 1.1, 1.2};
+  const double zero_y[3] = {1.0, 1.0, 1.0};
+  const double zero_z[3] = {neg0, pos0, 3.0};
+  ExpectDeviceOrder(box, zero_x, zero_y, zero_z, type3, 3);
+
+  const double col_x[2] = {-0.2, 0.2};
+  const double col_y[2] = {1.0, 1.0};
+  const double col_z[2] = {1.0, 2.0};
+  ExpectDeviceOrder(box, col_x, col_y, col_z, type2, 2, 2, 1);
+
+  const int n = 64;
+  const double wide[3] = {8.0, 8.0, 8.0};
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  std::vector<int> type(static_cast<size_t>(n), 0);
+  int atom = 0;
+  for (int iz = 0; iz < 4; ++iz) {
+    for (int iy = 0; iy < 4; ++iy) {
+      for (int ix = 0; ix < 4; ++ix) {
+        x[static_cast<size_t>(atom)] = 0.5 + 2.0 * ix;
+        y[static_cast<size_t>(atom)] = 0.5 + 2.0 * iy;
+        z[static_cast<size_t>(atom)] = 0.5 + 2.0 * iz;
+        ++atom;
+      }
+    }
+  }
+  ExpectDeviceOrder(wide, x.data(), y.data(), z.data(), type.data(), n);
+}
+
 TEST(ClusterList, PadsAndSortsEachColumn) {
   const double box[3] = {10.0, 10.0, 10.0};
   const double x[3] = {1.0, 1.2, 1.1};

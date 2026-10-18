@@ -2,6 +2,8 @@
 
 #include <vector>
 
+#include "neighbor/cluster_order.hpp"
+
 namespace tilemd {
 
 // One cluster is 8 consecutive slots in a column. Padding slots use this type
@@ -47,8 +49,6 @@ struct ClusterPairs {
   int kept = 0;
 };
 
-int ShiftIndex(int sx, int sy, int sz);
-
 // Column counts and edges used by `BuildClusterGrid`. `nx` and `ny` of 0 choose
 // the default, about 32 atoms per column.
 struct ClusterShape {
@@ -59,6 +59,17 @@ struct ClusterShape {
 };
 
 ClusterShape ChooseClusterColumns(int n, const double* box, int nx = 0, int ny = 0);
+
+// Slot order of the device rebuild: wrap, stable-sort by OrderedZ, then by
+// column, then pad. Tests compare this with `BuildClusterGrid`.
+struct ClusterSlots {
+  int ncluster = 0;
+  std::vector<int> type;
+  std::vector<int> gid;
+};
+
+ClusterSlots SlotsInDeviceOrder(const double* box, const double* x, const double* y,
+                                const double* z, const int* type, int n, int nx = 0, int ny = 0);
 
 ClusterGrid BuildClusterGrid(const double* box, const double* x, const double* y, const double* z,
                              const int* type, int n, double reach, int nx = 0, int ny = 0);

@@ -7,6 +7,7 @@
 
 #include "md/tile_rebuild.hpp"
 #include "neighbor/cluster_list.hpp"
+#include "neighbor/cluster_order.hpp"
 
 namespace tilemd {
 namespace {
@@ -28,38 +29,6 @@ void* MustMalloc(size_t bytes) {
 }
 
 int Grid(int n) { return std::max(1, (n + kBlock - 1) / kBlock); }
-
-__device__ double WrapCoord(double x, double length) {
-  double y = x - floor(x / length) * length;
-  if (y >= length) y = 0.0;
-  if (y < 0.0) y += length;
-  return y;
-}
-
-__device__ int ColumnIndex(double x, double edge, int ncolumn) {
-  int i = static_cast<int>(floor(x / edge));
-  if (i < 0) i = 0;
-  if (i >= ncolumn) i = ncolumn - 1;
-  return i;
-}
-
-// Match std::stable_sort's treatment of -0 and +0 as equal.
-__device__ unsigned long long OrderedZ(double z) {
-  if (z == 0.0) z = 0.0;
-  unsigned long long bits = static_cast<unsigned long long>(__double_as_longlong(z));
-  const unsigned long long mask = (bits >> 63) ? ~0ull : (1ull << 63);
-  return bits ^ mask;
-}
-
-__device__ int ShiftCode(int sx, int sy, int sz) {
-  return (sx + 1) + 3 * ((sy + 1) + 3 * (sz + 1));
-}
-
-__device__ double AxisGap(double a_lo, double a_hi, double b_lo, double b_hi) {
-  if (a_hi < b_lo) return b_lo - a_hi;
-  if (b_hi < a_lo) return a_lo - b_hi;
-  return 0.0;
-}
 
 __global__ void CountTileColumns(const double* x, const double* y, const double* z, int n, int nx,
                                  int ny, double edge_x, double edge_y, double box_x, double box_y,
@@ -312,7 +281,7 @@ __global__ void FillTilePairs(const int* column_cluster, const int* column_nclus
           const double gap_z = AxisGap(lo_z[ci], hi_z[ci], j_lo_z, j_hi_z);
           if (gap_x * gap_x + gap_y * gap_y + gap_z * gap_z < reach2) {
             cj_out[cursor] = cj;
-            shift_out[cursor] = ShiftCode(sx, sy, sz);
+            shift_out[cursor] = ShiftIndex(sx, sy, sz);
             ++cursor;
           }
         }
