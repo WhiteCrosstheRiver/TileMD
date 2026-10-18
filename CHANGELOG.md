@@ -16,3 +16,4 @@
 - M5 CPU cluster-pair list: x–y columns, stable z order, 8-atom clusters, bounding-box pruning.
 - M5 CPU tile force on that list, checked against the double-precision oracle.
 - M5 GPU tile force: one warp per cluster, selectable beside the atom-neighbor engine. The cluster list is still built on the host.
+- M5 tile-efficiency measurement on `melt_4000` and the 32k melt.

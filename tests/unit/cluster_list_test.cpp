@@ -3,6 +3,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <fstream>
+#include <iostream>
+#include <string>
 #include <vector>
 
 #include "lj_reference.hpp"
@@ -128,4 +131,67 @@ TEST(ClusterList, EveryRealAtomAppearsOnce) {
       EXPECT_LE(grid.z[static_cast<size_t>(slot - 1)], grid.z[static_cast<size_t>(slot)]);
     }
   }
+}
+
+TEST(ClusterList, ReportsTileEfficiency) {
+  auto efficiency = [](const std::vector<double>& x, const std::vector<double>& y,
+                       const std::vector<double>& z, const double* box) {
+    const int n = static_cast<int>(x.size());
+    std::vector<int> type(static_cast<size_t>(n), 0);
+    tilemd::LjPair pair;
+    const tilemd::TileForces got = tilemd::ComputeTileForces(
+        box, x.data(), y.data(), z.data(), type.data(), n, &pair, 1, 0.3, tilemd::LjShift::None);
+    EXPECT_GT(got.pairs_visited, 0);
+    EXPECT_LE(got.pairs_inside, got.pairs_visited);
+    const double ratio =
+        static_cast<double>(got.pairs_inside) / static_cast<double>(got.pairs_visited);
+    std::cout << "tile efficiency n=" << n << " inside=" << got.pairs_inside
+              << " visited=" << got.pairs_visited << " ratio=" << ratio << "\n";
+    return ratio;
+  };
+
+  const tilemd::ref::System melt =
+      tilemd::ref::ReadExtxyz(std::string(TILEMD_SOURCE_DIR) + "/tests/fixtures/melt_4000.extxyz");
+  const double melt_ratio = efficiency(melt.x, melt.y, melt.z, melt.box);
+  EXPECT_GT(melt_ratio, 0.015);
+  EXPECT_LT(melt_ratio, 0.04);
+
+  std::ifstream dump(std::string(TILEMD_SOURCE_DIR) + "/tests/validation/lammps_ref/init_32k.dump");
+  ASSERT_TRUE(dump) << "32k initial dump";
+  std::string line;
+  double box[3] = {};
+  int n = -1;
+  while (std::getline(dump, line)) {
+    if (line.rfind("ITEM: NUMBER OF ATOMS", 0) == 0) {
+      dump >> n;
+      std::getline(dump, line);
+    } else if (line.rfind("ITEM: BOX BOUNDS", 0) == 0) {
+      double lo = 0.0;
+      double hi = 0.0;
+      for (int axis = 0; axis < 3; ++axis) {
+        dump >> lo >> hi;
+        box[axis] = hi - lo;
+        std::getline(dump, line);
+      }
+    } else if (line.rfind("ITEM: ATOMS", 0) == 0) {
+      break;
+    }
+  }
+  ASSERT_EQ(n, 32000);
+  std::vector<double> x(32000);
+  std::vector<double> y(32000);
+  std::vector<double> z(32000);
+  for (int row = 0; row < n; ++row) {
+    int id = 0;
+    int type = 0;
+    double vx = 0.0;
+    double vy = 0.0;
+    double vz = 0.0;
+    dump >> id >> type >> x[static_cast<size_t>(id - 1)] >> y[static_cast<size_t>(id - 1)] >>
+        z[static_cast<size_t>(id - 1)] >> vx >> vy >> vz;
+  }
+  ASSERT_TRUE(dump);
+  const double melt32_ratio = efficiency(x, y, z, box);
+  EXPECT_GT(melt32_ratio, 0.005);
+  EXPECT_LT(melt32_ratio, 0.02);
 }
