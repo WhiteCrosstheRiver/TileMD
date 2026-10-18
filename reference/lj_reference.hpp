@@ -1,0 +1,65 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+namespace tilemd::ref {
+
+// Double-precision LJ oracle from PLAN.md section 4.1. Deliberately direct:
+// one loop over every ordered pair, minimum image with std::rint (the double
+// form of the rintf rule in decision D10).
+
+enum class Shift { None, Energy, Force };
+
+struct PairCoeff {
+  int type_i = 0;
+  int type_j = 0;
+  double epsilon = 1.0;
+  double sigma = 1.0;
+  double cutoff = 2.5;
+};
+
+struct System {
+  double box[3] = {1.0, 1.0, 1.0};
+  Shift shift = Shift::None;
+  std::vector<int> type;
+  std::vector<double> x;
+  std::vector<double> y;
+  std::vector<double> z;
+  std::vector<PairCoeff> pairs;
+};
+
+struct Observables {
+  std::vector<double> fx;
+  std::vector<double> fy;
+  std::vector<double> fz;
+  std::vector<double> energy;
+  double potential_energy = 0.0;
+  // xx, yy, zz, xy, xz, yz. Full-list definition, including the factor 1/2.
+  double virial[6] = {};
+};
+
+int NumAtoms(const System& system);
+
+Observables Compute(const System& system);
+
+void WriteExtxyz(const std::string& path, const System& system);
+void WriteObservablesJson(const std::string& path, const std::string& name, const System& system,
+                          const Observables& obs);
+
+System ReadExtxyz(const std::string& path);
+void ReadSystemHeader(const std::string& path, System& system);
+Observables ReadObservablesJson(const std::string& path);
+
+// LAMMPS custom dump: id type x y z fx fy fz, atom ids sorted.
+// Types are converted from LAMMPS's 1-based ids to 0-based.
+struct LammpsDump {
+  System system;
+  Observables observables;
+};
+LammpsDump ReadLammpsDump(const std::string& path, Shift shift,
+                          const std::vector<PairCoeff>& pairs);
+
+double MinImage(double delta, double length);
+
+}  // namespace tilemd::ref

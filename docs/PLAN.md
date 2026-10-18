@@ -12,7 +12,7 @@
 |---|---|---|---|---|---|
 | M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. GitHub remote not created (`gh` is not installed). |
 | M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | not started | — | | |
-| M2 CPU reference oracle | `m2-cpu-reference` | not started | G1-ref | | |
+| M2 CPU reference oracle | `m2-cpu-reference` | in progress | G1-ref | | Local gate passed (LAMMPS 22 Jul 2025 Update 4, CPU). No GitHub PR (`gh` is not installed). |
 | M3 GPU v0 (correct, simple) | `m3-gpu-v0` | not started | G1 | | |
 | M4 Performance foundation | `m4-perf-foundation` | not started | G2, G3 | | |
 | M5 Cluster-pair tiles (SIMT) | `m5-cluster-tiles` | not started | G2+ | | |

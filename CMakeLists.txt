@@ -52,6 +52,13 @@ add_executable(tilemd src/main.cu)
 target_link_libraries(tilemd PRIVATE tilemd_headers)
 tilemd_apply_cuda_flags(tilemd)
 
+add_library(tilemd_reference STATIC reference/lj_reference.cpp)
+target_include_directories(tilemd_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/reference)
+target_compile_features(tilemd_reference PUBLIC cxx_std_17)
+
+add_executable(tilemd_make_fixtures reference/make_fixtures.cpp)
+target_link_libraries(tilemd_make_fixtures PRIVATE tilemd_reference)
+
 if(TILEMD_BUILD_TESTS)
   include(CTest)
   enable_testing()
@@ -69,8 +76,10 @@ if(TILEMD_BUILD_TESTS)
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   FetchContent_MakeAvailable(googletest)
 
-  add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp)
-  target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers)
+  add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp tests/unit/lj_reference_test.cpp)
+  target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_reference)
+  file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" TILEMD_SOURCE_DIR_FWD)
+  target_compile_definitions(tilemd_cpu_tests PRIVATE TILEMD_SOURCE_DIR="${TILEMD_SOURCE_DIR_FWD}")
 
   add_executable(tilemd_gpu_tests tests/unit/gpu_smoke.cu)
   target_link_libraries(tilemd_gpu_tests PRIVATE GTest::gtest_main tilemd_headers)
