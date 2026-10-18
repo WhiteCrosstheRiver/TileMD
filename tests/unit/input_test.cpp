@@ -4,7 +4,10 @@
 
 #include <cmath>
 #include <filesystem>
+#include <iostream>
 #include <string>
+
+#include "io/run.hpp"
 
 namespace {
 
@@ -77,6 +80,64 @@ TEST(Input, VelocitiesRepeatForTheSameSeed) {
   other.replace(seed, 7, "seed 100");
   const tilemd::SimulationInput changed = tilemd::ParseInput(other, ".");
   EXPECT_NE(first.vx, changed.vx);
+}
+
+TEST(Input, ReferenceRunMatchesVerlet) {
+  std::string text = kMelt;
+  const auto steps = text.find("run            10");
+  text.replace(steps, std::string("run            10").size(), "run            20");
+  const auto thermo = text.find("thermo_every   100");
+  text.replace(thermo, std::string("thermo_every   100").size(), "thermo_every   10");
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  const std::vector<tilemd::ThermoRow> rows = tilemd::RunReference(input);
+  ASSERT_EQ(rows.size(), 3u);
+  EXPECT_EQ(rows[0].step, 0);
+  EXPECT_EQ(rows[1].step, 10);
+  EXPECT_EQ(rows[2].step, 20);
+  const double e0 = rows[0].total_per_atom;
+  const double e1 = rows[2].total_per_atom;
+  std::cout << "cpu input nve e0 " << e0 << " e20 " << e1 << "\n";
+  // A fresh T=1.44 lattice oscillates. This bound records that swing.
+  const double swing = std::abs(e1 - e0) / std::abs(e0);
+  EXPECT_GT(swing, 8.0e-4);
+  EXPECT_LT(swing, 2.0e-3);
+  const int n = tilemd::ref::NumAtoms(input.system);
+  const double kinetic0 = rows[0].kinetic_per_atom * static_cast<double>(n);
+  const double dof = static_cast<double>(3 * n - 3);
+  EXPECT_NEAR(rows[0].temperature, 2.0 * kinetic0 / dof, 1.0e-12);
+  tilemd::ref::System system = input.system;
+  tilemd::ref::Dynamics state = tilemd::ref::MakeDynamics(system, input.vx, input.vy, input.vz);
+  for (int step = 0; step < 20; ++step) {
+    tilemd::ref::VelocityVerletStep(system, state, input.timestep, input.mass);
+  }
+  system.x = state.x;
+  system.y = state.y;
+  system.z = state.z;
+  const tilemd::ref::Observables obs = tilemd::ref::Compute(system);
+  double kinetic = 0.0;
+  for (int i = 0; i < n; ++i) {
+    kinetic += 0.5 * input.mass *
+               (state.vx[static_cast<size_t>(i)] * state.vx[static_cast<size_t>(i)] +
+                state.vy[static_cast<size_t>(i)] * state.vy[static_cast<size_t>(i)] +
+                state.vz[static_cast<size_t>(i)] * state.vz[static_cast<size_t>(i)]);
+  }
+  const double total = (obs.potential_energy + kinetic) / static_cast<double>(n);
+  EXPECT_NEAR(rows[2].total_per_atom, total, 1.0e-12);
+}
+
+TEST(Input, ZeroTemperatureLangevinCools) {
+  std::string text = kMelt;
+  const auto ensemble = text.find("ensemble       nve");
+  text.replace(ensemble, std::string("ensemble       nve").size(),
+               "ensemble       langevin 0 2.0 3");
+  const auto steps = text.find("run            10");
+  text.replace(steps, std::string("run            10").size(), "run            40");
+  const auto thermo = text.find("thermo_every   100");
+  text.replace(thermo, std::string("thermo_every   100").size(), "thermo_every   40");
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  const std::vector<tilemd::ThermoRow> rows = tilemd::RunReference(input);
+  ASSERT_EQ(rows.size(), 2u);
+  EXPECT_LT(rows[1].kinetic_per_atom, 0.5 * rows[0].kinetic_per_atom);
 }
 
 TEST(Input, UnknownKeyIsRejected) {

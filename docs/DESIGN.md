@@ -30,7 +30,7 @@ The CPU builder in `src/neighbor/cluster_list.cpp` is the M5 list. Columns lie o
 
 ## Input
 
-`src/io/input.cpp` reads the Appendix D key-value file. `box fcc nx ny nz density` builds the four-atom cell at that number density. `structure` reads positions from an extended XYZ file, resolved from the input file's directory. `velocity T seed` draws a Gaussian of variance `T/m` from Philox4x32-10 with counter `(atom, 0, 0, 0)` and key `(seed, 0)`, then subtracts the mean so the total momentum is zero. `ensemble langevin T gamma seed` fills the BAOAB parameters. The `tilemd` executable still only prints its version; it does not run the file yet.
+`src/io/input.cpp` reads the Appendix D key-value file. `box fcc nx ny nz density` builds the four-atom cell at that number density. `structure` reads positions from an extended XYZ file, resolved from the input file's directory. `velocity T seed` draws a Gaussian of variance `T/m` from Philox4x32-10 with counter `(atom, 0, 0, 0)` and key `(seed, 0)`, then subtracts the mean so the total momentum is zero. `ensemble langevin T gamma seed` fills the BAOAB parameters. `tilemd input.in` integrates that file with the CPU reference and writes thermo to stdout: step, time, temperature, potential and kinetic energy per atom, total energy per atom, and pressure. Temperature is `2 KE / (3N − 3)`. `thermo_every 0` writes only the header. Extended-XYZ dumps are not written, and this path does not call the GPU engine.
 
 ## CPU reference
 
