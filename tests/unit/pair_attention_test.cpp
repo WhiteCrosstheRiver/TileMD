@@ -702,3 +702,126 @@ TEST(PairAttention, SetflCuNiMatchesLammps) {
   EXPECT_LT(tile_error, 1.0e-5);
   EXPECT_NEAR(from_tiles.potential_energy, energy, 1.0e-8 * (1.0 + std::abs(energy)));
 }
+
+void CuNiStart(std::vector<double>& x, std::vector<double>& y, std::vector<double>& z,
+               std::vector<double>& vx, std::vector<double>& vy, std::vector<double>& vz,
+               std::vector<int>& type) {
+  x = {10.0, 12.2, 10.4, 13.1};
+  y = {10.0, 10.1, 12.5, 12.0};
+  z = {10.0, 10.3, 10.2, 11.4};
+  type = {0, 1, 0, 1};
+  vx = {-1.2158939747208246, -0.41589397472082434, 0.3841060252791757, 1.1841060252791757};
+  vy = {-0.75993373420051535, -0.25993373420051535, 0.24006626579948462, 0.74006626579948465};
+  vz = {-0.29602650631979388, 0.10397349368020617, 0.50397349368020616, -0.29602650631979388};
+}
+
+void RunCuNiNve(tilemd::EamSetfl& potential, double box[3], std::vector<double>& x,
+                std::vector<double>& y, std::vector<double>& z, std::vector<double>& vx,
+                std::vector<double>& vy, std::vector<double>& vz, const std::vector<int>& type,
+                bool tiles) {
+  const int n = static_cast<int>(x.size());
+  const double dt = 0.001;
+  for (int step = 0; step < 100; ++step) {
+    const tilemd::AttentionResult force =
+        tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
+                                               type.data(), n, 0.3)
+              : tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(),
+                                          n);
+    for (int i = 0; i < n; ++i) {
+      const double half =
+          0.5 * dt * tilemd::kMetalFtm2v / potential.Mass(type[static_cast<size_t>(i)]);
+      vx[static_cast<size_t>(i)] += half * force.fx[static_cast<size_t>(i)];
+      vy[static_cast<size_t>(i)] += half * force.fy[static_cast<size_t>(i)];
+      vz[static_cast<size_t>(i)] += half * force.fz[static_cast<size_t>(i)];
+      x[static_cast<size_t>(i)] += dt * vx[static_cast<size_t>(i)];
+      y[static_cast<size_t>(i)] += dt * vy[static_cast<size_t>(i)];
+      z[static_cast<size_t>(i)] += dt * vz[static_cast<size_t>(i)];
+      WrapBox(&x[static_cast<size_t>(i)], box[0]);
+      WrapBox(&y[static_cast<size_t>(i)], box[1]);
+      WrapBox(&z[static_cast<size_t>(i)], box[2]);
+    }
+    const tilemd::AttentionResult second =
+        tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
+                                               type.data(), n, 0.3)
+              : tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(),
+                                          n);
+    for (int i = 0; i < n; ++i) {
+      const double half =
+          0.5 * dt * tilemd::kMetalFtm2v / potential.Mass(type[static_cast<size_t>(i)]);
+      vx[static_cast<size_t>(i)] += half * second.fx[static_cast<size_t>(i)];
+      vy[static_cast<size_t>(i)] += half * second.fy[static_cast<size_t>(i)];
+      vz[static_cast<size_t>(i)] += half * second.fz[static_cast<size_t>(i)];
+    }
+  }
+}
+
+TEST(PairAttention, SetflCuNiNveMatchesLammpsFor100Steps) {
+  const std::string table = CuNiPotential();
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cuni_setfl_nve_100.txt";
+  if (table.empty() || !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "CuNi NVE reference has not been generated";
+  }
+  std::ifstream in(ref);
+  int n = 0;
+  double box[3];
+  double dt_ref = 0.0;
+  int steps_ref = 0;
+  double energy = 0.0;
+  in >> n >> box[0] >> box[1] >> box[2] >> dt_ref >> steps_ref >> energy;
+  ASSERT_EQ(n, 4);
+  ASSERT_EQ(steps_ref, 100);
+  std::vector<double> rx(4);
+  std::vector<double> ry(4);
+  std::vector<double> rz(4);
+  std::vector<double> rvx(4);
+  std::vector<double> rvy(4);
+  std::vector<double> rvz(4);
+  for (int i = 0; i < n; ++i) {
+    in >> rx[static_cast<size_t>(i)] >> ry[static_cast<size_t>(i)] >> rz[static_cast<size_t>(i)] >>
+        rvx[static_cast<size_t>(i)] >> rvy[static_cast<size_t>(i)] >> rvz[static_cast<size_t>(i)];
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  for (const bool tiles : {false, true}) {
+    std::vector<double> x;
+    std::vector<double> y;
+    std::vector<double> z;
+    std::vector<double> vx;
+    std::vector<double> vy;
+    std::vector<double> vz;
+    std::vector<int> type;
+    CuNiStart(x, y, z, vx, vy, vz, type);
+    tilemd::EamSetfl potential(table);
+    potential.SetAtoms(type.data(), n);
+    RunCuNiNve(potential, box, x, y, z, vx, vy, vz, type, tiles);
+    const tilemd::AttentionResult final_force =
+        tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
+                                               type.data(), n, 0.3)
+              : tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(),
+                                          n);
+    double max_dx = 0.0;
+    double max_dv = 0.0;
+    for (int i = 0; i < n; ++i) {
+      const double dx =
+          x[static_cast<size_t>(i)] - rx[static_cast<size_t>(i)] -
+          box[0] * std::rint((x[static_cast<size_t>(i)] - rx[static_cast<size_t>(i)]) / box[0]);
+      const double dy =
+          y[static_cast<size_t>(i)] - ry[static_cast<size_t>(i)] -
+          box[1] * std::rint((y[static_cast<size_t>(i)] - ry[static_cast<size_t>(i)]) / box[1]);
+      const double dz =
+          z[static_cast<size_t>(i)] - rz[static_cast<size_t>(i)] -
+          box[2] * std::rint((z[static_cast<size_t>(i)] - rz[static_cast<size_t>(i)]) / box[2]);
+      max_dx = std::max(max_dx, std::sqrt(dx * dx + dy * dy + dz * dz));
+      const double dvx = vx[static_cast<size_t>(i)] - rvx[static_cast<size_t>(i)];
+      const double dvy = vy[static_cast<size_t>(i)] - rvy[static_cast<size_t>(i)];
+      const double dvz = vz[static_cast<size_t>(i)] - rvz[static_cast<size_t>(i)];
+      max_dv = std::max(max_dv, std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz));
+    }
+    std::cout << std::scientific << std::setprecision(8) << "setfl nve 100 tiles " << tiles
+              << " max |dx| " << max_dx << " max |dv| " << max_dv << " energy "
+              << final_force.potential_energy << " lammps " << energy << "\n";
+    EXPECT_LT(max_dx, 1.0e-8);
+    EXPECT_LT(max_dv, 1.0e-8);
+    EXPECT_NEAR(final_force.potential_energy, energy, 1.0e-6 * (1.0 + std::abs(energy)));
+  }
+}
