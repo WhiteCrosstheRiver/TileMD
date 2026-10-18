@@ -11,3 +11,4 @@
 - M4 device-side rebuild decision. The step loop no longer copies status back on every step.
 - M4 CUDA graph of 50 steps, with a segment snapshot that restores and grows the list on overflow.
 - M4 energy and virial only on thermo steps, reduced on device into a ring drained at segment boundaries.
+- M4 launch bounds and read-only position loads on the force and neighbor kernels. Block size stays 128.

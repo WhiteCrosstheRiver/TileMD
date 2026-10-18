@@ -91,6 +91,11 @@ void* MustMalloc(size_t bytes) {
   return ptr;
 }
 
+template <typename T>
+__device__ T LoadReadOnly(const T* ptr) {
+  return __ldg(ptr);
+}
+
 __device__ float MinImage(float delta, float length) {
   return delta - length * rintf(delta / length);
 }
@@ -180,7 +185,7 @@ __global__ void CellKeyKernel(const float4* pos, int* keys, int* indices, int n,
   if (RebuildSkipped(gate)) return;
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  float4 p = pos[i];
+  float4 p = LoadReadOnly(pos + i);
   int ix =
       CellCoord(p.x, static_cast<float>(c_ncell[0]) / static_cast<float>(c_box[0]), c_ncell[0]);
   int iy =
@@ -238,13 +243,14 @@ __global__ void FillCellStart(const int* sorted_keys, int* cell_start, int n, in
   }
 }
 
-__global__ void NeighborKernel(const float4* pos, const int* cell_start, const int* cell_atoms,
-                               int* nn, int* nl, int max_neigh, int n, int* max_nn,
-                               DeviceStatus* status, const int* gate) {
+__global__ void __launch_bounds__(kBlock)
+    NeighborKernel(const float4* __restrict__ pos, const int* __restrict__ cell_start,
+                   const int* __restrict__ cell_atoms, int* nn, int* nl, int max_neigh, int n,
+                   int* max_nn, DeviceStatus* status, const int* gate) {
   if (RebuildSkipped(gate)) return;
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  float4 pi = pos[i];
+  float4 pi = LoadReadOnly(pos + i);
   int ix =
       CellCoord(pi.x, static_cast<float>(c_ncell[0]) / static_cast<float>(c_box[0]), c_ncell[0]);
   int iy =
@@ -261,7 +267,7 @@ __global__ void NeighborKernel(const float4* pos, const int* cell_start, const i
         for (int s = cell_start[cell]; s < cell_start[cell + 1]; ++s) {
           int j = cell_atoms[s];
           if (j == i) continue;
-          float4 pj = pos[j];
+          float4 pj = LoadReadOnly(pos + j);
           float dxij = MinImage(pi.x - pj.x, static_cast<float>(c_box[0]));
           float dyij = MinImage(pi.y - pj.y, static_cast<float>(c_box[1]));
           float dzij = MinImage(pi.z - pj.z, static_cast<float>(c_box[2]));
@@ -301,15 +307,19 @@ __global__ void SortNeighbors(int* nl, const int* nn, const int* gid, int n, con
   }
 }
 
-__global__ void ForceKernel(const double* x, const double* y, const double* z, const int* type,
-                            const int* nn, const int* nl, float* fx, float* fy, float* fz,
-                            double* energy, double* wxx, double* wyy, double* wzz, double* wxy,
-                            double* wxz, double* wyz, int n, DeviceStatus* status,
-                            const int* ev_flag) {
+__global__ void __launch_bounds__(kBlock)
+    ForceKernel(const double* __restrict__ x, const double* __restrict__ y,
+                const double* __restrict__ z, const int* __restrict__ type,
+                const int* __restrict__ nn, const int* __restrict__ nl, float* fx, float* fy,
+                float* fz, double* energy, double* wxx, double* wyy, double* wzz, double* wxy,
+                double* wxz, double* wyz, int n, DeviceStatus* status, const int* ev_flag) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   const int ev = ev_flag != nullptr && *ev_flag != 0;
-  int ti = type[i];
+  int ti = LoadReadOnly(type + i);
+  const double xi = LoadReadOnly(x + i);
+  const double yi = LoadReadOnly(y + i);
+  const double zi = LoadReadOnly(z + i);
   double ax = 0.0;
   double ay = 0.0;
   double az = 0.0;
@@ -320,10 +330,10 @@ __global__ void ForceKernel(const double* x, const double* y, const double* z, c
   double axy = 0.0;
   double axz = 0.0;
   double ayz = 0.0;
-  int count = nn[i];
+  int count = LoadReadOnly(nn + i);
   for (int k = 0; k < count; ++k) {
-    int j = nl[static_cast<long long>(k) * n + i];
-    int tj = type[j];
+    int j = LoadReadOnly(nl + static_cast<long long>(k) * n + i);
+    int tj = LoadReadOnly(type + j);
     PairRow p = c_pairs[ti * kMaxTypes + tj];
     if (!p.defined) {
       atomicExch(&status->nan_detected, 1);
@@ -331,9 +341,9 @@ __global__ void ForceKernel(const double* x, const double* y, const double* z, c
     }
     // Double geometry. A float box of length ~17 already moves melt forces by
     // ~1e-3 relative, which misses the 1e-5 gate. The stored force is still float.
-    double dx = MinImageDouble(x[i] - x[j], c_box[0]);
-    double dy = MinImageDouble(y[i] - y[j], c_box[1]);
-    double dz = MinImageDouble(z[i] - z[j], c_box[2]);
+    double dx = MinImageDouble(xi - LoadReadOnly(x + j), c_box[0]);
+    double dy = MinImageDouble(yi - LoadReadOnly(y + j), c_box[1]);
+    double dz = MinImageDouble(zi - LoadReadOnly(z + j), c_box[2]);
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 >= p.rc2) continue;
     double inv_r2 = 1.0 / r2;
@@ -506,9 +516,11 @@ __global__ void DispKernel(const float4* pos, const float4* xref, int n, DeviceS
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   float d2 = 0.f;
   if (i < n) {
-    float dx = MinImage(pos[i].x - xref[i].x, static_cast<float>(c_box[0]));
-    float dy = MinImage(pos[i].y - xref[i].y, static_cast<float>(c_box[1]));
-    float dz = MinImage(pos[i].z - xref[i].z, static_cast<float>(c_box[2]));
+    float4 pi = LoadReadOnly(pos + i);
+    float4 ref = LoadReadOnly(xref + i);
+    float dx = MinImage(pi.x - ref.x, static_cast<float>(c_box[0]));
+    float dy = MinImage(pi.y - ref.y, static_cast<float>(c_box[1]));
+    float dz = MinImage(pi.z - ref.z, static_cast<float>(c_box[2]));
     d2 = dx * dx + dy * dy + dz * dz;
   }
   float block_max = Reduce(reduce_storage).Reduce(d2, MaxFloat());
