@@ -9,6 +9,7 @@
 
 #include "force/eam.hpp"
 #include "force/tile_attention.hpp"
+#include "neighbor/cluster_order.hpp"
 
 namespace tilemd {
 namespace {
@@ -59,18 +60,7 @@ ThermoRow Sample(const SimulationInput& input, const ref::Dynamics& state, int s
 }
 
 double WrapMetal(double value, double length, int* image) {
-  double periods = std::floor(value / length);
-  int shift = static_cast<int>(periods);
-  value -= periods * length;
-  if (value >= length) {
-    value -= length;
-    ++shift;
-  } else if (value < 0.0) {
-    value += length;
-    --shift;
-  }
-  *image += shift;
-  return value;
+  return WrapImage(value, length, image);
 }
 
 template <typename Potential>

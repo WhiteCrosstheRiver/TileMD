@@ -134,18 +134,7 @@ __device__ int WrapCell(int i, int ncell, int delta) {
 }
 
 __device__ double WrapDouble(double x, double length, int* image) {
-  double periods = floor(x / length);
-  int shift = static_cast<int>(periods);
-  x -= periods * length;
-  if (x >= length) {
-    x -= length;
-    ++shift;
-  } else if (x < 0.0) {
-    x += length;
-    --shift;
-  }
-  *image += shift;
-  return x;
+  return WrapImage(x, length, image);
 }
 
 __device__ float WrapFloat(float x, float length) {

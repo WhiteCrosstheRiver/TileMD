@@ -78,18 +78,7 @@ __device__ void DecodeTileShift(int shift, int* sx, int* sy, int* sz) {
 }
 
 __device__ double WrapTile(double value, double length, int* image) {
-  double periods = floor(value / length);
-  int shift = static_cast<int>(periods);
-  value -= periods * length;
-  if (value >= length) {
-    value -= length;
-    ++shift;
-  } else if (value < 0.0) {
-    value += length;
-    --shift;
-  }
-  *image += shift;
-  return value;
+  return WrapImage(value, length, image);
 }
 
 __device__ float MinImageTile(float delta, float length) {

@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "neighbor/cluster_order.hpp"
+
 namespace tilemd::ref {
 namespace {
 
@@ -566,18 +568,7 @@ LammpsDump ReadLammpsDump(const std::string& path, Shift shift,
 namespace {
 
 double WrapCoordinate(double value, double length, int* image) {
-  double periods = std::floor(value / length);
-  int shift = static_cast<int>(periods);
-  value -= periods * length;
-  if (value >= length) {
-    value -= length;
-    ++shift;
-  } else if (value < 0.0) {
-    value += length;
-    --shift;
-  }
-  *image += shift;
-  return value;
+  return tilemd::WrapImage(value, length, image);
 }
 
 Observables ForcesAt(System& system, const Dynamics& state) {

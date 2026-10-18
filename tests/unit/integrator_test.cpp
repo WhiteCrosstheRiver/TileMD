@@ -9,6 +9,7 @@
 
 #include "lj_reference.hpp"
 #include "md/tile_thermo.hpp"
+#include "neighbor/cluster_order.hpp"
 
 namespace {
 
@@ -96,6 +97,36 @@ TEST(Integrator, LeapfrogMatchesVerletFor100Steps) {
   std::cout << "leapfrog vs verlet max |dx| " << max_x << " max |dv| " << max_v << "\n";
   EXPECT_LT(max_x, 1.0e-8) << "position delta after 100 steps";
   EXPECT_LT(max_v, 1.0e-8) << "integer-time velocity delta after 100 steps";
+}
+
+TEST(Integrator, CrossingBelowZeroDecrementsTheImage) {
+  tilemd::ref::System system;
+  system.box[0] = 10.0;
+  system.box[1] = 10.0;
+  system.box[2] = 10.0;
+  system.shift = tilemd::ref::Shift::None;
+  tilemd::ref::PairCoeff coeff;
+  system.pairs = {coeff};
+  system.type = {0, 0};
+  system.x = {0.01, 6.0};
+  system.y = {1.0, 1.0};
+  system.z = {1.0, 1.0};
+  tilemd::ref::Dynamics state =
+      tilemd::ref::MakeDynamics(system, {-1.0, 0.0}, {0.0, 0.0}, {0.0, 0.0});
+  tilemd::ref::VelocityVerletStep(system, state, 0.02, 1.0);
+  EXPECT_EQ(state.imgx[0], -1);
+  EXPECT_EQ(state.imgx[1], 0);
+  EXPECT_GT(state.x[0], 9.0);
+  EXPECT_LT(state.x[0], 10.0);
+  int image = 3;
+  EXPECT_DOUBLE_EQ(tilemd::WrapImage(10.0, 10.0, &image), 0.0);
+  EXPECT_EQ(image, 4);
+  image = 0;
+  EXPECT_NEAR(tilemd::WrapImage(-25.0, 10.0, &image), 5.0, 1.0e-12);
+  EXPECT_EQ(image, -3);
+  image = 0;
+  EXPECT_DOUBLE_EQ(tilemd::WrapImage(0.0, 10.0, &image), 0.0);
+  EXPECT_EQ(image, 0);
 }
 
 tilemd::ref::Observables Observe(const tilemd::ref::System& origin,

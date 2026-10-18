@@ -36,6 +36,27 @@ TILEMD_HD inline double OnReferenceBranchFloat(float now, float ref, double leng
 // keys z with OrderedZ after wrapping, then groups by column. std::stable_sort
 // on that key matches a stable radix sort.
 
+// Wrapped coordinate plus the number of box crossings added to `*image`.
+// A value of exactly `length` lands on 0 and counts as one crossing.
+TILEMD_HD inline double WrapImage(double value, double length, int* image) {
+#if defined(__CUDA_ARCH__)
+  double periods = ::floor(value / length);
+#else
+  double periods = std::floor(value / length);
+#endif
+  int shift = static_cast<int>(periods);
+  value -= periods * length;
+  if (value >= length) {
+    value -= length;
+    ++shift;
+  } else if (value < 0.0) {
+    value += length;
+    --shift;
+  }
+  *image += shift;
+  return value;
+}
+
 TILEMD_HD inline double WrapCoord(double x, double length) {
 #if defined(__CUDA_ARCH__)
   double y = x - ::floor(x / length) * length;

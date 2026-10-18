@@ -58,7 +58,8 @@ target_link_libraries(tilemd PRIVATE tilemd_headers tilemd_io)
 tilemd_apply_cuda_flags(tilemd)
 
 add_library(tilemd_reference STATIC reference/lj_reference.cpp reference/tf32_pair.cpp)
-target_include_directories(tilemd_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/reference)
+target_include_directories(tilemd_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/reference
+                                           PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_features(tilemd_reference PUBLIC cxx_std_17)
 
 add_executable(tilemd_make_fixtures reference/make_fixtures.cpp)
