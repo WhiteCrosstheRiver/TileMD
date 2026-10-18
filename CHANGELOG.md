@@ -18,6 +18,7 @@
 - M5 GPU tile force: one warp per cluster, selectable beside the atom-neighbor engine. The cluster list is still built on the host.
 - M5 tile-efficiency measurement on `melt_4000` and the 32k melt.
 - M5 cluster-pair rows are appended in cluster order. The earlier row starts overlapped, and the corrected tile forces match the double-precision oracle on the fixtures. Efficiency is 0.102 at 4k and 0.0916 at 32k.
+- M5 column-width sweep. Targets of 64, 128, and 256 atoms per column keep the same inside-pair count and the same forces. None of them reaches the 40–60% efficiency expectation.
 - M6 CPU leapfrog integrator. Over 100 steps it matches velocity Verlet to round-off on the double-precision oracle.
 - M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded, and this kernel has not been launched.
 - M7 CPU prototype of the TF32 and 3×TF32 pair score. It is not on the default force path. On the 4000-atom melt the 3×TF32 force error is outside the 1e-5 tolerance.

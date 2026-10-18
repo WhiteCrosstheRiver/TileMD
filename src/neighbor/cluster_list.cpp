@@ -265,7 +265,7 @@ void DecodeShift(int shift, int* sx, int* sy, int* sz) {
 
 TileForces ComputeTileForces(const double* box, const double* x, const double* y, const double* z,
                              const int* type, int n, const LjPair* pairs, int npair, double skin,
-                             LjShift shift) {
+                             LjShift shift, int nx, int ny) {
   if (skin < 0.0) throw std::invalid_argument("skin must be non-negative");
   if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
   Prepared table[kMaxTypes][kMaxTypes] = {};
@@ -299,7 +299,7 @@ TileForces ComputeTileForces(const double* box, const double* x, const double* y
     max_cut = std::max(max_cut, coeff.cutoff);
   }
 
-  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, max_cut + skin);
+  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, max_cut + skin, nx, ny);
   const ClusterPairs list = BuildClusterPairs(grid);
   TileForces out;
   out.fx.assign(static_cast<size_t>(n), 0.0);

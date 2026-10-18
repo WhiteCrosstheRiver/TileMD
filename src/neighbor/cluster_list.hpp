@@ -77,8 +77,9 @@ struct TileForces {
   int pairs_inside = 0;
 };
 
+// `nx` and `ny` of 0 use the default column grid, about 32 atoms per column.
 TileForces ComputeTileForces(const double* box, const double* x, const double* y, const double* z,
                              const int* type, int n, const LjPair* pairs, int npair, double skin,
-                             LjShift shift);
+                             LjShift shift, int nx = 0, int ny = 0);
 
 }  // namespace tilemd

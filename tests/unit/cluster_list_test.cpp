@@ -258,3 +258,72 @@ TEST(ClusterList, TileForcesMatchTheOracleOnFixtures) {
     }
   }
 }
+
+void ColumnCounts(int n, const double* box, int target, int* nx, int* ny) {
+  const double columns = std::max(1.0, static_cast<double>(n) / static_cast<double>(target));
+  const double aspect = box[0] / box[1];
+  *nx = std::max(1, static_cast<int>(std::lround(std::sqrt(columns * aspect))));
+  *ny = std::max(1, static_cast<int>(std::lround(columns / static_cast<double>(*nx))));
+}
+
+TEST(ClusterList, ColumnWidthKeepsTheForce) {
+  const int targets[] = {32, 64, 128, 256};
+  const char* names[] = {"fcc_500", "melt_4000"};
+  const std::string dir = std::string(TILEMD_SOURCE_DIR) + "/tests/fixtures/";
+  for (const char* name : names) {
+    tilemd::ref::System system = tilemd::ref::ReadExtxyz(dir + name + ".extxyz");
+    tilemd::ref::ReadSystemHeader(dir + name + ".json", system);
+    const int n = tilemd::ref::NumAtoms(system);
+    std::vector<tilemd::LjPair> pairs;
+    for (const tilemd::ref::PairCoeff& coeff : system.pairs) {
+      tilemd::LjPair pair;
+      pair.type_i = coeff.type_i;
+      pair.type_j = coeff.type_j;
+      pair.epsilon = coeff.epsilon;
+      pair.sigma = coeff.sigma;
+      pair.cutoff = coeff.cutoff;
+      pairs.push_back(pair);
+    }
+    tilemd::LjShift shift = tilemd::LjShift::None;
+    if (system.shift == tilemd::ref::Shift::Energy) shift = tilemd::LjShift::Energy;
+    if (system.shift == tilemd::ref::Shift::Force) shift = tilemd::LjShift::Force;
+    const tilemd::ref::Observables oracle = tilemd::ref::Compute(system);
+    double sum_sq = 0.0;
+    for (int i = 0; i < n; ++i) {
+      sum_sq += oracle.fx[static_cast<size_t>(i)] * oracle.fx[static_cast<size_t>(i)] +
+                oracle.fy[static_cast<size_t>(i)] * oracle.fy[static_cast<size_t>(i)] +
+                oracle.fz[static_cast<size_t>(i)] * oracle.fz[static_cast<size_t>(i)];
+    }
+    const double rms = std::sqrt(sum_sq / static_cast<double>(n));
+    for (int target : targets) {
+      int nx = 0;
+      int ny = 0;
+      ColumnCounts(n, system.box, target, &nx, &ny);
+      const tilemd::TileForces got = tilemd::ComputeTileForces(
+          system.box, system.x.data(), system.y.data(), system.z.data(), system.type.data(), n,
+          pairs.data(), static_cast<int>(pairs.size()), 0.3, shift, nx, ny);
+      double max_delta = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const double ex = got.fx[static_cast<size_t>(i)] - oracle.fx[static_cast<size_t>(i)];
+        const double ey = got.fy[static_cast<size_t>(i)] - oracle.fy[static_cast<size_t>(i)];
+        const double ez = got.fz[static_cast<size_t>(i)] - oracle.fz[static_cast<size_t>(i)];
+        max_delta = std::max(max_delta, std::sqrt(ex * ex + ey * ey + ez * ez));
+      }
+      const double ratio =
+          static_cast<double>(got.pairs_inside) / static_cast<double>(got.pairs_visited);
+      std::cout << "columns " << name << " target " << target << " nx " << nx << " ny " << ny
+                << " inside " << got.pairs_inside << " visited " << got.pairs_visited << " ratio "
+                << ratio << " force_max " << max_delta << "\n";
+      EXPECT_GT(got.pairs_visited, 0) << name << " target " << target;
+      if (std::string(name) == "fcc_500") EXPECT_EQ(got.pairs_inside, 27000) << target;
+      if (std::string(name) == "melt_4000") EXPECT_EQ(got.pairs_inside, 219324) << target;
+      EXPECT_LT(ratio, 0.20) << name << " target " << target;
+      if (std::string(name) == "melt_4000" && target == 256) EXPECT_LT(ratio, 0.09);
+      if (rms < 1.0e-8) {
+        EXPECT_LT(max_delta, 1.0e-8) << name << " target " << target;
+      } else {
+        EXPECT_LT(max_delta / rms, 1.0e-9) << name << " target " << target;
+      }
+    }
+  }
+}
