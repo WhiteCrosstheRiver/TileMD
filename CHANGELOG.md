@@ -9,7 +9,8 @@
 - M2 double-precision LJ reference, seven fixtures, and a LAMMPS force comparison for `melt_4000`.
 - M3 thread-per-atom neighbor list, LJ force, and velocity Verlet on the GPU.
 - M3 32k NVE comparison against CPU LAMMPS, plus drift and RDF drivers for the remaining G1 runs.
-- M3 RDF on the 32k melt. The L1 distance to LAMMPS g(r) is 0.00147, inside the 0.02 gate. The 10^6-step drift comparison is still running.
+- M3 RDF on the 32k melt. The L1 distance to LAMMPS g(r) is 0.00147, inside the 0.02 gate.
+- M3 32k drift, 10^6 steps of shifted-force LJ. The least-squares slope of the recorded energy per atom is −3.55e-10 per τ for TileMD and +1.52e-10 per τ for LAMMPS. The absolute ratio is 2.33, outside the 2× gate. Both slopes sit inside two standard errors of zero. The TileMD samples were written with six significant digits.
 - M4 stable Morton reorder at each neighbor rebuild, with output still in the original atom order.
 - M4 device-side rebuild decision. The step loop no longer copies status back on every step.
 - M4 CUDA graph of 50 steps, with a segment snapshot that restores and grows the list on overflow.
@@ -43,6 +44,6 @@
 - M7 CPU prototype of the TF32 and 3×TF32 pair score. It is not on the default force path. On the 4000-atom melt the 3×TF32 force error is outside the 1e-5 tolerance.
 - M7 compact-cell remeasure of that score. A cell of about 4 atoms lowers the melt force error from 7.9e-5 to 1.9e-5, which is still outside the tolerance.
 - M8 CPU pair-attention API. Lennard-Jones matches the double-precision oracle. A two-pass EAM funcfl evaluation matches LAMMPS `pair_style eam` on displaced fcc copper, including 100 steps of metal-unit velocity Verlet.
-- M8 device Lennard-Jones attention kernel. One warp walks one i-cluster on the host-built list. A host replay of that lane map matches the oracle on the fixtures. The device launch waits while the 32k drift occupies the GPU.
+- M8 device Lennard-Jones attention kernel. One warp walks one i-cluster on the host-built list. A host replay of that lane map matches the oracle on the fixtures. The device launch has not been run.
 - M5 cluster-tile GPU test now uses a 12³ box. The previous 8³ box has only two cells and the engine rejects it.
 - M8 pair-attention passes on the cluster-pair list. Lennard-Jones matches the oracle, and the copper EAM tile walk matches LAMMPS to `1.6e-13`. One hundred metal-unit steps on that walk stay within `1.4e-14` Å of the LAMMPS trajectory.

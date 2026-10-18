@@ -113,7 +113,8 @@ if(TILEMD_BUILD_TESTS)
                                  tests/unit/cluster_list_test.cpp                                  tests/unit/integrator_test.cpp
                                  tests/unit/tf32_pair_test.cpp
                                  tests/unit/pair_attention_test.cpp
-                                 tests/unit/input_test.cpp)
+                                 tests/unit/input_test.cpp
+                                 tests/unit/drift_32k_test.cpp)
   target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_reference
                                                  tilemd_cluster tilemd_eam tilemd_io)
   file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" TILEMD_SOURCE_DIR_FWD)

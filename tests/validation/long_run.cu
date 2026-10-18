@@ -132,6 +132,10 @@ void RunDrift(const std::string& dump, int steps, int sample_every, const std::s
   tilemd::Engine engine(LoadDump(dump, tilemd::Shift::Force));
   std::ofstream out(out_path);
   if (!out) throw std::runtime_error("cannot write " + out_path);
+  out.setf(std::ios::scientific);
+  out.precision(17);
+  std::cout.setf(std::ios::scientific);
+  std::cout.precision(17);
   out << "# step time e_per_atom pe_per_atom ke_per_atom\n";
   std::vector<double> times;
   std::vector<double> energies;
