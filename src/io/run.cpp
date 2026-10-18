@@ -67,8 +67,8 @@ template <typename Potential>
 AttentionResult MetalForces(Potential& potential, const SimulationInput& input,
                             const ref::Dynamics& state) {
   const int n = ref::NumAtoms(input.system);
-  return EvaluateAttentionTiles(potential, input.system.box, state.x.data(), state.y.data(),
-                                state.z.data(), input.system.type.data(), n, input.skin);
+  return WarpLaneAttention(potential, input.system.box, state.x.data(), state.y.data(),
+                           state.z.data(), input.system.type.data(), n, input.skin);
 }
 
 void DriftMetal(ref::Dynamics& state, const SimulationInput& input, double dt) {
