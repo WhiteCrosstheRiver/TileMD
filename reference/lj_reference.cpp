@@ -1,6 +1,7 @@
 #include "lj_reference.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -581,6 +582,117 @@ void IntegerTimeVelocity(const System& system, const Dynamics& half_step, double
         half_step.vy[static_cast<size_t>(i)] + half * force.fy[static_cast<size_t>(i)];
     vz[static_cast<size_t>(i)] =
         half_step.vz[static_cast<size_t>(i)] + half * force.fz[static_cast<size_t>(i)];
+  }
+}
+
+namespace {
+
+std::uint32_t MulHi(std::uint32_t a, std::uint32_t b, std::uint32_t* lo) {
+  const std::uint64_t product = static_cast<std::uint64_t>(a) * b;
+  *lo = static_cast<std::uint32_t>(product);
+  return static_cast<std::uint32_t>(product >> 32);
+}
+
+void StandardNormals(std::uint32_t seed, std::uint64_t step, int gid, double out[3]) {
+  const PhiloxWord word =
+      Philox4x32_10(static_cast<std::uint32_t>(gid), static_cast<std::uint32_t>(step),
+                    static_cast<std::uint32_t>(step >> 32), 0u, seed, 0u);
+  const std::uint32_t bits[4] = {word.w[0], word.w[1], word.w[2], word.w[3]};
+  double normal[4];
+  for (int pair = 0; pair < 2; ++pair) {
+    const double u1 = (static_cast<double>(bits[2 * pair]) + 0.5) * (1.0 / 4294967296.0);
+    const double u2 = (static_cast<double>(bits[2 * pair + 1]) + 0.5) * (1.0 / 4294967296.0);
+    const double radius = std::sqrt(-2.0 * std::log(u1));
+    const double angle = 6.28318530717958647692 * u2;
+    normal[2 * pair] = radius * std::cos(angle);
+    normal[2 * pair + 1] = radius * std::sin(angle);
+  }
+  out[0] = normal[0];
+  out[1] = normal[1];
+  out[2] = normal[2];
+}
+
+}  // namespace
+
+PhiloxWord Philox4x32_10(std::uint32_t c0, std::uint32_t c1, std::uint32_t c2, std::uint32_t c3,
+                         std::uint32_t k0, std::uint32_t k1) {
+  std::uint32_t ctr[4] = {c0, c1, c2, c3};
+  std::uint32_t key0 = k0;
+  std::uint32_t key1 = k1;
+  for (int round = 0; round < 10; ++round) {
+    std::uint32_t lo0 = 0;
+    std::uint32_t lo1 = 0;
+    const std::uint32_t hi0 = MulHi(0xD2511F53u, ctr[0], &lo0);
+    const std::uint32_t hi1 = MulHi(0xCD9E8D57u, ctr[2], &lo1);
+    const std::uint32_t next0 = hi1 ^ ctr[1] ^ key0;
+    const std::uint32_t next1 = lo1;
+    const std::uint32_t next2 = hi0 ^ ctr[3] ^ key1;
+    const std::uint32_t next3 = lo0;
+    ctr[0] = next0;
+    ctr[1] = next1;
+    ctr[2] = next2;
+    ctr[3] = next3;
+    key0 += 0x9E3779B9u;
+    key1 += 0xBB67AE85u;
+  }
+  PhiloxWord out;
+  out.w[0] = ctr[0];
+  out.w[1] = ctr[1];
+  out.w[2] = ctr[2];
+  out.w[3] = ctr[3];
+  return out;
+}
+
+void LangevinBaoabStep(System& system, Dynamics& state, double dt, double mass,
+                       const Langevin& thermo, std::uint64_t step) {
+  CheckDynamics(system, state, dt, mass);
+  if (!(thermo.gamma >= 0.0)) throw std::runtime_error("friction must be non-negative");
+  if (!(thermo.temperature >= 0.0)) throw std::runtime_error("temperature must be non-negative");
+  if (!(thermo.gamma > 0.0)) {
+    VelocityVerletStep(system, state, dt, mass);
+    return;
+  }
+  const Observables first = ForcesAt(system, state);
+  const double half = 0.5 * dt / mass;
+  const double half_dt = 0.5 * dt;
+  const int n = NumAtoms(system);
+  for (int i = 0; i < n; ++i) {
+    state.vx[static_cast<size_t>(i)] += half * first.fx[static_cast<size_t>(i)];
+    state.vy[static_cast<size_t>(i)] += half * first.fy[static_cast<size_t>(i)];
+    state.vz[static_cast<size_t>(i)] += half * first.fz[static_cast<size_t>(i)];
+    state.x[static_cast<size_t>(i)] =
+        WrapCoordinate(state.x[static_cast<size_t>(i)] + half_dt * state.vx[static_cast<size_t>(i)],
+                       system.box[0], &state.imgx[static_cast<size_t>(i)]);
+    state.y[static_cast<size_t>(i)] =
+        WrapCoordinate(state.y[static_cast<size_t>(i)] + half_dt * state.vy[static_cast<size_t>(i)],
+                       system.box[1], &state.imgy[static_cast<size_t>(i)]);
+    state.z[static_cast<size_t>(i)] =
+        WrapCoordinate(state.z[static_cast<size_t>(i)] + half_dt * state.vz[static_cast<size_t>(i)],
+                       system.box[2], &state.imgz[static_cast<size_t>(i)]);
+  }
+  const double decay = std::exp(-thermo.gamma * dt);
+  const double noise = std::sqrt(thermo.temperature * (1.0 - decay * decay) / mass);
+  for (int i = 0; i < n; ++i) {
+    double draw[3] = {};
+    if (noise > 0.0) StandardNormals(thermo.seed, step, i, draw);
+    state.vx[static_cast<size_t>(i)] = decay * state.vx[static_cast<size_t>(i)] + noise * draw[0];
+    state.vy[static_cast<size_t>(i)] = decay * state.vy[static_cast<size_t>(i)] + noise * draw[1];
+    state.vz[static_cast<size_t>(i)] = decay * state.vz[static_cast<size_t>(i)] + noise * draw[2];
+    state.x[static_cast<size_t>(i)] =
+        WrapCoordinate(state.x[static_cast<size_t>(i)] + half_dt * state.vx[static_cast<size_t>(i)],
+                       system.box[0], &state.imgx[static_cast<size_t>(i)]);
+    state.y[static_cast<size_t>(i)] =
+        WrapCoordinate(state.y[static_cast<size_t>(i)] + half_dt * state.vy[static_cast<size_t>(i)],
+                       system.box[1], &state.imgy[static_cast<size_t>(i)]);
+    state.z[static_cast<size_t>(i)] =
+        WrapCoordinate(state.z[static_cast<size_t>(i)] + half_dt * state.vz[static_cast<size_t>(i)],
+                       system.box[2], &state.imgz[static_cast<size_t>(i)]);
+  }
+  const Observables second = ForcesAt(system, state);
+  for (int i = 0; i < n; ++i) {
+    state.vx[static_cast<size_t>(i)] += half * second.fx[static_cast<size_t>(i)];
+    state.vy[static_cast<size_t>(i)] += half * second.fy[static_cast<size_t>(i)];
+    state.vz[static_cast<size_t>(i)] += half * second.fz[static_cast<size_t>(i)];
   }
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -89,5 +90,25 @@ void LeapfrogStep(System& system, Dynamics& state, double dt, double mass);
 // v(t) = v(t − dt/2) + ½ dt f(t) / m, using the positions stored in `half_step`.
 void IntegerTimeVelocity(const System& system, const Dynamics& half_step, double dt, double mass,
                          std::vector<double>& vx, std::vector<double>& vy, std::vector<double>& vz);
+
+// Random123 Philox4x32-10. Ten rounds, key bumped after each round.
+struct PhiloxWord {
+  std::uint32_t w[4] = {};
+};
+
+PhiloxWord Philox4x32_10(std::uint32_t c0, std::uint32_t c1, std::uint32_t c2, std::uint32_t c3,
+                         std::uint32_t k0, std::uint32_t k1);
+
+// BAOAB Langevin on the velocity-Verlet state. gamma == 0 calls VelocityVerletStep.
+// The Ornstein–Uhlenbeck draw is three standard normals from one Philox word.
+// Counter is (gid, step low, step high, 0) and the key is (seed, 0).
+struct Langevin {
+  double gamma = 1.0;
+  double temperature = 1.0;
+  std::uint32_t seed = 1;
+};
+
+void LangevinBaoabStep(System& system, Dynamics& state, double dt, double mass,
+                       const Langevin& thermo, std::uint64_t step);
 
 }  // namespace tilemd::ref

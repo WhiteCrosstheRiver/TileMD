@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <random>
@@ -203,4 +204,111 @@ TEST(Integrator, FloatCoordinatesDriftFromDoubleLeapfrog) {
   std::cout << "pos4 leapfrog 100 max |dx| " << max_x << "\n";
   EXPECT_GT(max_x, 1.0e-8);
   EXPECT_LT(max_x, 2.0e-7);
+}
+
+tilemd::ref::System FreeParticle() {
+  tilemd::ref::System system;
+  system.box[0] = 20.0;
+  system.box[1] = 20.0;
+  system.box[2] = 20.0;
+  system.shift = tilemd::ref::Shift::None;
+  system.pairs.push_back({0, 0, 1.0, 1.0, 2.5});
+  system.type.push_back(0);
+  system.x.push_back(1.0);
+  system.y.push_back(2.0);
+  system.z.push_back(3.0);
+  return system;
+}
+
+TEST(Integrator, PhiloxWordsStayFixed) {
+  const tilemd::ref::PhiloxWord zero = tilemd::ref::Philox4x32_10(0u, 0u, 0u, 0u, 0u, 0u);
+  EXPECT_EQ(zero.w[0], 0x6627e8d5u);
+  EXPECT_EQ(zero.w[1], 0xe169c58du);
+  EXPECT_EQ(zero.w[2], 0xbc57ac4cu);
+  EXPECT_EQ(zero.w[3], 0x9b00dbd8u);
+  const tilemd::ref::PhiloxWord other = tilemd::ref::Philox4x32_10(1u, 2u, 3u, 4u, 5u, 6u);
+  EXPECT_EQ(other.w[0], 0xc0c839bcu);
+  EXPECT_EQ(other.w[1], 0x889c87c5u);
+  EXPECT_EQ(other.w[2], 0x61986739u);
+  EXPECT_EQ(other.w[3], 0x2d4623d0u);
+}
+
+TEST(Integrator, ZeroFrictionMatchesVerlet) {
+  tilemd::ref::System origin = SmallMelt();
+  const int n = 40;
+  std::vector<double> vx(static_cast<size_t>(n), 0.1);
+  std::vector<double> vy(static_cast<size_t>(n), -0.2);
+  std::vector<double> vz(static_cast<size_t>(n), 0.05);
+  constexpr double dt = 0.005;
+  constexpr double mass = 1.0;
+  tilemd::ref::System verlet_system = origin;
+  tilemd::ref::System langevin_system = origin;
+  tilemd::ref::Dynamics verlet = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::Dynamics langevin = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::Langevin thermo;
+  thermo.gamma = 0.0;
+  thermo.temperature = 1.5;
+  thermo.seed = 7;
+  for (int step = 0; step < 20; ++step) {
+    tilemd::ref::VelocityVerletStep(verlet_system, verlet, dt, mass);
+    tilemd::ref::LangevinBaoabStep(langevin_system, langevin, dt, mass, thermo,
+                                   static_cast<std::uint64_t>(step));
+  }
+  EXPECT_EQ(MaxAbs(verlet.x, langevin.x), 0.0);
+  EXPECT_EQ(MaxAbs(verlet.vx, langevin.vx), 0.0);
+}
+
+TEST(Integrator, ZeroTemperatureDampsTheFreeParticle) {
+  tilemd::ref::System system = FreeParticle();
+  std::vector<double> vx(1, 1.0);
+  std::vector<double> vy(1, -0.5);
+  std::vector<double> vz(1, 0.25);
+  tilemd::ref::Dynamics state = tilemd::ref::MakeDynamics(system, vx, vy, vz);
+  tilemd::ref::Langevin thermo;
+  thermo.gamma = 2.0;
+  thermo.temperature = 0.0;
+  thermo.seed = 3;
+  constexpr double dt = 0.005;
+  constexpr int steps = 40;
+  for (int step = 0; step < steps; ++step) {
+    tilemd::ref::LangevinBaoabStep(system, state, dt, 1.0, thermo,
+                                   static_cast<std::uint64_t>(step));
+  }
+  const double decay = std::exp(-thermo.gamma * dt * steps);
+  EXPECT_NEAR(state.vx[0], decay, 1.0e-12);
+  EXPECT_NEAR(state.vy[0], -0.5 * decay, 1.0e-12);
+  EXPECT_NEAR(state.vz[0], 0.25 * decay, 1.0e-12);
+}
+
+TEST(Integrator, LangevinRepeatsForTheSameSeed) {
+  tilemd::ref::System origin = FreeParticle();
+  origin.type.push_back(0);
+  origin.x.push_back(10.0);
+  origin.y.push_back(10.0);
+  origin.z.push_back(10.0);
+  std::vector<double> vx(2, 0.2);
+  std::vector<double> vy(2, 0.0);
+  std::vector<double> vz(2, -0.1);
+  tilemd::ref::Langevin thermo;
+  thermo.gamma = 1.0;
+  thermo.temperature = 1.2;
+  thermo.seed = 11;
+  tilemd::ref::System first_system = origin;
+  tilemd::ref::System second_system = origin;
+  tilemd::ref::System other_system = origin;
+  tilemd::ref::Dynamics first = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::Dynamics second = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::Dynamics other = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  for (int step = 0; step < 8; ++step) {
+    const auto key = static_cast<std::uint64_t>(step);
+    tilemd::ref::LangevinBaoabStep(first_system, first, 0.005, 1.0, thermo, key);
+    tilemd::ref::LangevinBaoabStep(second_system, second, 0.005, 1.0, thermo, key);
+    tilemd::ref::Langevin other_thermo = thermo;
+    other_thermo.seed = 12;
+    tilemd::ref::LangevinBaoabStep(other_system, other, 0.005, 1.0, other_thermo, key);
+  }
+  EXPECT_EQ(MaxAbs(first.vx, second.vx), 0.0);
+  EXPECT_EQ(MaxAbs(first.x, second.x), 0.0);
+  EXPECT_GT(MaxAbs(first.vx, other.vx), 0.0);
+  EXPECT_NE(first.vx[0], first.vx[1]);
 }
