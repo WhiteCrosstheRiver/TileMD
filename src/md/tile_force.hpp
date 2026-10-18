@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cuda_runtime.h>
+
 #include <vector>
 
 #include "neighbor/cluster_list.hpp"
@@ -19,5 +21,13 @@ struct TileDeviceForces {
 // stored image shift and writes one double accumulator per real atom.
 TileDeviceForces RunTileForceGpu(const ClusterGrid& grid, const ClusterPairs& list,
                                  const LjPair* pairs, int npair, LjShift shift);
+
+// One leapfrog step. Neighbor coordinates are the cluster snapshot. The owning
+// lane updates that atom's double position and velocity and writes `pos_next`.
+void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, const LjPair* pairs,
+                          int npair, LjShift shift, double* x, double* y, double* z, double* vx,
+                          double* vy, double* vz, int* imgx, int* imgy, int* imgz, float4* pos_next,
+                          float4* xref, void* status, int* step_counter, double dt,
+                          double inv_mass);
 
 }  // namespace tilemd

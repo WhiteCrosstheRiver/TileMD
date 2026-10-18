@@ -631,6 +631,7 @@ struct Engine::Impl {
   int* imgz = nullptr;
   int* type = nullptr;
   float4* pos = nullptr;
+  float4* pos_next = nullptr;
   float4* xref = nullptr;
   float* fx = nullptr;
   float* fy = nullptr;
@@ -679,6 +680,7 @@ struct Engine::Impl {
   ThermoPartial* thermo_partial = nullptr;
   int npartial = 0;
   bool thermo_origin_written = false;
+  bool leapfrog_ready = false;
   std::vector<ThermoSample> drained;
 
   void Upload();
@@ -700,6 +702,7 @@ struct Engine::Impl {
   int BuildNeighbors(bool grow);
   void ComputeForce();
   GpuForces TileForces();
+  void FusedTileStep(float4* pos_out);
   void RunClusterTiles(int steps);
   GpuForces DownloadForces(int overflow);
 
@@ -715,6 +718,7 @@ struct Engine::Impl {
     cudaFree(imgz);
     cudaFree(type);
     cudaFree(pos);
+    cudaFree(pos_next);
     cudaFree(xref);
     cudaFree(fx);
     cudaFree(fy);
@@ -867,6 +871,7 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
     impl_->imgz = static_cast<int*>(MustMalloc(sizeof(int) * n));
     impl_->type = static_cast<int*>(MustMalloc(sizeof(int) * n));
     impl_->pos = static_cast<float4*>(MustMalloc(sizeof(float4) * n));
+    impl_->pos_next = static_cast<float4*>(MustMalloc(sizeof(float4) * n));
     impl_->xref = static_cast<float4*>(MustMalloc(sizeof(float4) * n));
     impl_->fx = static_cast<float*>(MustMalloc(sizeof(float) * n));
     impl_->fy = static_cast<float*>(MustMalloc(sizeof(float) * n));
@@ -1348,18 +1353,65 @@ GpuForces Engine::Impl::TileForces() {
   return out;
 }
 
+void Engine::Impl::FusedTileStep(float4* pos_out) {
+  std::vector<double> hx(static_cast<size_t>(n));
+  std::vector<double> hy(static_cast<size_t>(n));
+  std::vector<double> hz(static_cast<size_t>(n));
+  std::vector<int> htype(static_cast<size_t>(n));
+  if (n > 0) {
+    TILEMD_CHECK(cudaMemcpy(hx.data(), x, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hy.data(), y, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hz.data(), z, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(htype.data(), type, sizeof(int) * n, cudaMemcpyDeviceToHost));
+  }
+  double max_cut = 0.0;
+  std::vector<LjPair> coeffs;
+  coeffs.reserve(system.pairs.size());
+  for (const PairSpec& spec : system.pairs) {
+    LjPair row;
+    row.type_i = spec.type_i;
+    row.type_j = spec.type_j;
+    row.epsilon = spec.epsilon;
+    row.sigma = spec.sigma;
+    row.cutoff = spec.cutoff;
+    coeffs.push_back(row);
+    max_cut = std::max(max_cut, spec.cutoff);
+  }
+  LjShift lj_shift = LjShift::None;
+  if (system.shift == Shift::Energy) lj_shift = LjShift::Energy;
+  if (system.shift == Shift::Force) lj_shift = LjShift::Force;
+  const ClusterGrid grid = BuildClusterGrid(system.box, hx.data(), hy.data(), hz.data(),
+                                            htype.data(), n, max_cut + system.skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  RunFusedTileLeapfrog(grid, list, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift, x, y,
+                       z, vx, vy, vz, imgx, imgy, imgz, pos_out, xref, status, step_counter,
+                       system.dt, 1.0 / system.mass);
+  forces_ready = false;
+}
+
 void Engine::Impl::RunClusterTiles(int steps) {
   Upload();
-  TileForces();
-  const double inv_mass = 1.0 / system.mass;
-  for (int step = 0; step < steps; ++step) {
-    KickDrift<<<Grid(n), kBlock>>>(x, y, z, vx, vy, vz, fx, fy, fz, imgx, imgy, imgz, n, system.dt,
-                                   inv_mass);
+  if (!leapfrog_ready) {
+    RefreshShadow<<<Grid(n), kBlock>>>(x, y, z, type, pos, n);
     CheckLaunch();
+    if (n > 0) {
+      TILEMD_CHECK(cudaMemcpy(xref, pos, sizeof(float4) * n, cudaMemcpyDeviceToDevice));
+      TILEMD_CHECK(cudaMemcpy(pos_next, pos, sizeof(float4) * n, cudaMemcpyDeviceToDevice));
+    }
     TileForces();
-    Kick<<<Grid(n), kBlock>>>(vx, vy, vz, fx, fy, fz, n, system.dt, inv_mass);
+    // v(−dt/2) = v(0) − ½ dt f(0) / m. Kick adds ½ dt f / m, so the sign is flipped.
+    Kick<<<Grid(n), kBlock>>>(vx, vy, vz, fx, fy, fz, n, -system.dt, 1.0 / system.mass);
     CheckLaunch();
+    leapfrog_ready = true;
+    forces_ready = false;
   }
+  float4* latest = pos;
+  float4* other = pos_next;
+  for (int step = 0; step < steps; ++step) {
+    FusedTileStep(other);
+    std::swap(latest, other);
+  }
+  if (latest != pos) std::swap(pos, pos_next);
 }
 
 void Engine::Impl::RecordInitialThermo() {
