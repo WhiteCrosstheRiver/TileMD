@@ -95,9 +95,7 @@ void ExpectLj(const std::string& name, bool tiles) {
   }
 }
 
-// Host replay of LjAttentionTileKernel: lane = i_local + 8 * j_sub, four
-// j-clusters per step, shuffle source = atom + 8 * j_sub, then a sum over the
-// four lanes that own one i atom.
+// Lennard-Jones through the shared warp-lane walk.
 tilemd::AttentionResult WarpLaneWalk(const tilemd::ref::System& system) {
   std::vector<tilemd::AttentionPair> pairs;
   for (const tilemd::ref::PairCoeff& coeff : system.pairs) {
@@ -112,168 +110,8 @@ tilemd::AttentionResult WarpLaneWalk(const tilemd::ref::System& system) {
   tilemd::LjAttention potential(pairs.data(), static_cast<int>(pairs.size()),
                                 ToShift(system.shift));
   const int n = tilemd::ref::NumAtoms(system);
-  const tilemd::ClusterGrid grid =
-      tilemd::BuildClusterGrid(system.box, system.x.data(), system.y.data(), system.z.data(),
-                               system.type.data(), n, potential.Cutoff() + 0.3);
-  const tilemd::ClusterPairs list = tilemd::BuildClusterPairs(grid);
-  tilemd::LjRow table[tilemd::LjAttention::kMaxTypes * tilemd::LjAttention::kMaxTypes];
-  potential.CopyTable(table);
-  const int force_shift = potential.ForceShift();
-  tilemd::AttentionResult out;
-  out.fx.assign(static_cast<size_t>(n), 0.0);
-  out.fy.assign(static_cast<size_t>(n), 0.0);
-  out.fz.assign(static_cast<size_t>(n), 0.0);
-  out.energy.assign(static_cast<size_t>(n), 0.0);
-
-  struct Lane {
-    int ti = tilemd::kMaskType;
-    int gi = -1;
-    double xi = 0.0;
-    double yi = 0.0;
-    double zi = 0.0;
-    double ax = 0.0;
-    double ay = 0.0;
-    double az = 0.0;
-    double a1 = 0.0;
-    double ae = 0.0;
-    double axx = 0.0;
-    double ayy = 0.0;
-    double azz = 0.0;
-    double axy = 0.0;
-    double axz = 0.0;
-    double ayz = 0.0;
-  };
-
-  for (int ci = 0; ci < grid.ncluster; ++ci) {
-    Lane lane[32];
-    for (int lane_id = 0; lane_id < 32; ++lane_id) {
-      const int i_local = lane_id % tilemd::kClusterSize;
-      const int slot_i = ci * tilemd::kClusterSize + i_local;
-      lane[lane_id].ti = grid.type[static_cast<size_t>(slot_i)];
-      lane[lane_id].gi = grid.gid[static_cast<size_t>(slot_i)];
-      lane[lane_id].xi = grid.x[static_cast<size_t>(slot_i)];
-      lane[lane_id].yi = grid.y[static_cast<size_t>(slot_i)];
-      lane[lane_id].zi = grid.z[static_cast<size_t>(slot_i)];
-    }
-    const int begin = list.ci_start[static_cast<size_t>(ci)];
-    const int end = list.ci_start[static_cast<size_t>(ci) + 1];
-    for (int pair0 = begin; pair0 < end; pair0 += 4) {
-      double xj[32] = {};
-      double yj[32] = {};
-      double zj[32] = {};
-      int tj[32];
-      int active[32];
-      int other[32];
-      int sx[32];
-      int sy[32];
-      int sz[32];
-      for (int lane_id = 0; lane_id < 32; ++lane_id) {
-        const int i_local = lane_id % tilemd::kClusterSize;
-        const int j_sub = lane_id / tilemd::kClusterSize;
-        const int pair = pair0 + j_sub;
-        active[lane_id] = pair < end ? 1 : 0;
-        other[lane_id] = active[lane_id] ? list.cj[static_cast<size_t>(pair)] : 0;
-        sx[lane_id] = 0;
-        sy[lane_id] = 0;
-        sz[lane_id] = 0;
-        if (active[lane_id]) {
-          const int shift = list.shift[static_cast<size_t>(pair)];
-          sx[lane_id] = shift % 3 - 1;
-          sy[lane_id] = (shift / 3) % 3 - 1;
-          sz[lane_id] = shift / 9 - 1;
-        }
-        const int slot_j = other[lane_id] * tilemd::kClusterSize + i_local;
-        tj[lane_id] = active[lane_id] ? grid.type[static_cast<size_t>(slot_j)] : tilemd::kMaskType;
-        if (active[lane_id] && tj[lane_id] != tilemd::kMaskType) {
-          xj[lane_id] = grid.x[static_cast<size_t>(slot_j)] + sx[lane_id] * grid.box[0];
-          yj[lane_id] = grid.y[static_cast<size_t>(slot_j)] + sy[lane_id] * grid.box[1];
-          zj[lane_id] = grid.z[static_cast<size_t>(slot_j)] + sz[lane_id] * grid.box[2];
-        }
-      }
-      for (int atom = 0; atom < tilemd::kClusterSize; ++atom) {
-        for (int lane_id = 0; lane_id < 32; ++lane_id) {
-          const int i_local = lane_id % tilemd::kClusterSize;
-          const int j_sub = lane_id / tilemd::kClusterSize;
-          const int source = atom + tilemd::kClusterSize * j_sub;
-          const int bt = tj[source];
-          if (!active[lane_id] || lane[lane_id].ti == tilemd::kMaskType ||
-              bt == tilemd::kMaskType) {
-            continue;
-          }
-          if (ci == other[lane_id] && atom == i_local && sx[lane_id] == 0 && sy[lane_id] == 0 &&
-              sz[lane_id] == 0) {
-            continue;
-          }
-          const tilemd::LjRow& row = table[lane[lane_id].ti * tilemd::LjAttention::kMaxTypes + bt];
-          if (!row.defined) continue;
-          const double dx = lane[lane_id].xi - xj[source];
-          const double dy = lane[lane_id].yi - yj[source];
-          const double dz = lane[lane_id].zi - zj[source];
-          const double r2 = dx * dx + dy * dy + dz * dz;
-          if (!(r2 < row.rc2) || !(r2 > 0.0)) continue;
-          double s = 0.0;
-          double u = 0.0;
-          tilemd::LjEvaluate(row, r2, force_shift, &s, &u);
-          lane[lane_id].ax += s * (lane[lane_id].xi - dx);
-          lane[lane_id].ay += s * (lane[lane_id].yi - dy);
-          lane[lane_id].az += s * (lane[lane_id].zi - dz);
-          lane[lane_id].a1 += s;
-          lane[lane_id].ae += 0.5 * u;
-          const double fix = s * dx;
-          const double fiy = s * dy;
-          const double fiz = s * dz;
-          lane[lane_id].axx += 0.5 * dx * fix;
-          lane[lane_id].ayy += 0.5 * dy * fiy;
-          lane[lane_id].azz += 0.5 * dz * fiz;
-          lane[lane_id].axy += 0.5 * dx * fiy;
-          lane[lane_id].axz += 0.5 * dx * fiz;
-          lane[lane_id].ayz += 0.5 * dy * fiz;
-        }
-      }
-    }
-    for (int i_local = 0; i_local < tilemd::kClusterSize; ++i_local) {
-      const Lane& owner = lane[i_local];
-      if (owner.ti == tilemd::kMaskType || owner.gi < 0) continue;
-      double rx = 0.0;
-      double ry = 0.0;
-      double rz = 0.0;
-      double r1 = 0.0;
-      double re = 0.0;
-      double rxx = 0.0;
-      double ryy = 0.0;
-      double rzz = 0.0;
-      double rxy = 0.0;
-      double rxz = 0.0;
-      double ryz = 0.0;
-      for (int j_sub = 0; j_sub < 4; ++j_sub) {
-        const Lane& src = lane[i_local + tilemd::kClusterSize * j_sub];
-        rx += src.ax;
-        ry += src.ay;
-        rz += src.az;
-        r1 += src.a1;
-        re += src.ae;
-        rxx += src.axx;
-        ryy += src.ayy;
-        rzz += src.azz;
-        rxy += src.axy;
-        rxz += src.axz;
-        ryz += src.ayz;
-      }
-      const int gi = owner.gi;
-      out.fx[static_cast<size_t>(gi)] = owner.xi * r1 - rx;
-      out.fy[static_cast<size_t>(gi)] = owner.yi * r1 - ry;
-      out.fz[static_cast<size_t>(gi)] = owner.zi * r1 - rz;
-      out.energy[static_cast<size_t>(gi)] = re;
-      out.virial[0] += rxx;
-      out.virial[1] += ryy;
-      out.virial[2] += rzz;
-      out.virial[3] += rxy;
-      out.virial[4] += rxz;
-      out.virial[5] += ryz;
-    }
-  }
-  for (int i = 0; i < n; ++i) out.potential_energy += out.energy[static_cast<size_t>(i)];
-  return out;
+  return tilemd::WarpLaneAttention(potential, system.box, system.x.data(), system.y.data(),
+                                   system.z.data(), system.type.data(), n, 0.3);
 }
 
 }  // namespace
@@ -409,6 +247,50 @@ TEST(PairAttention, EamMatchesLammpsCopper) {
             << tile_error << " energy " << from_tiles.potential_energy << "\n";
   EXPECT_LT(tile_error, 1.0e-5);
   EXPECT_NEAR(from_tiles.potential_energy, energy, 1.0e-8 * (1.0 + std::abs(energy)));
+}
+
+TEST(PairAttention, EamWarpLaneMatchesTheTileList) {
+  const std::filesystem::path table =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "Cu_u3.eam";
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cu_u3_108.txt";
+  if (!std::filesystem::exists(table) || !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "Cu EAM reference has not been generated";
+  }
+  std::ifstream in(ref);
+  int n = 0;
+  double box[3];
+  double energy = 0.0;
+  in >> n >> box[0] >> box[1] >> box[2] >> energy;
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  std::vector<int> type(static_cast<size_t>(n), 0);
+  for (int i = 0; i < n; ++i) {
+    double fx = 0.0;
+    double fy = 0.0;
+    double fz = 0.0;
+    in >> x[static_cast<size_t>(i)] >> y[static_cast<size_t>(i)] >> z[static_cast<size_t>(i)] >>
+        fx >> fy >> fz;
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  tilemd::EamFuncfl lanes(table.string());
+  tilemd::EamFuncfl tiles(table.string());
+  const tilemd::AttentionResult got =
+      tilemd::WarpLaneAttention(lanes, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const tilemd::AttentionResult from_tiles =
+      tilemd::EvaluateAttentionTiles(tiles, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const double error =
+      RelativeForce(got.fx, got.fy, got.fz, from_tiles.fx, from_tiles.fy, from_tiles.fz);
+  std::cout << std::scientific << std::setprecision(8) << "eam warp lane vs tiles force_rel "
+            << error << "\n";
+  EXPECT_LT(error, 1.0e-9);
+  EXPECT_NEAR(got.potential_energy, from_tiles.potential_energy,
+              1.0e-9 * (1.0 + std::abs(from_tiles.potential_energy)));
+  for (int k = 0; k < 6; ++k) {
+    EXPECT_NEAR(got.virial[k], from_tiles.virial[k],
+                1.0e-9 * (1.0 + std::abs(from_tiles.virial[k])));
+  }
 }
 
 void CopperVelocity(int n, std::vector<double>& vx, std::vector<double>& vy,
