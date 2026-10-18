@@ -528,6 +528,107 @@ TEST(PairAttention, EamTileNveMatchesLammpsFor100Steps) {
   EXPECT_NEAR(final_force.potential_energy, energy, 1.0e-6 * (1.0 + std::abs(energy)));
 }
 
+TEST(PairAttention, EamWarpLaneNveMatchesLammpsFor100Steps) {
+  const std::filesystem::path table =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "Cu_u3.eam";
+  const std::filesystem::path start = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                      "validation" / "lammps_ref" / "cu_u3_108.txt";
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cu_u3_nve_100.txt";
+  if (!std::filesystem::exists(table) || !std::filesystem::exists(start) ||
+      !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "Cu NVE reference has not been generated";
+  }
+  std::ifstream initial(start);
+  int n = 0;
+  double box[3];
+  double unused_energy = 0.0;
+  initial >> n >> box[0] >> box[1] >> box[2] >> unused_energy;
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  std::vector<int> type(static_cast<size_t>(n), 0);
+  for (int i = 0; i < n; ++i) {
+    double fx = 0.0;
+    double fy = 0.0;
+    double fz = 0.0;
+    initial >> x[static_cast<size_t>(i)] >> y[static_cast<size_t>(i)] >>
+        z[static_cast<size_t>(i)] >> fx >> fy >> fz;
+  }
+  ASSERT_TRUE(static_cast<bool>(initial));
+  std::vector<double> vx;
+  std::vector<double> vy;
+  std::vector<double> vz;
+  CopperVelocity(n, vx, vy, vz);
+  tilemd::EamFuncfl potential(table.string());
+  const double mass = potential.Mass();
+  const double dt = 0.001;
+  const int steps = 100;
+  for (int step = 0; step < steps; ++step) {
+    const tilemd::AttentionResult force = tilemd::WarpLaneAttention(
+        potential, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+    const double half = 0.5 * dt * tilemd::kMetalFtm2v / mass;
+    for (int i = 0; i < n; ++i) {
+      vx[static_cast<size_t>(i)] += half * force.fx[static_cast<size_t>(i)];
+      vy[static_cast<size_t>(i)] += half * force.fy[static_cast<size_t>(i)];
+      vz[static_cast<size_t>(i)] += half * force.fz[static_cast<size_t>(i)];
+      x[static_cast<size_t>(i)] += dt * vx[static_cast<size_t>(i)];
+      y[static_cast<size_t>(i)] += dt * vy[static_cast<size_t>(i)];
+      z[static_cast<size_t>(i)] += dt * vz[static_cast<size_t>(i)];
+      WrapBox(&x[static_cast<size_t>(i)], box[0]);
+      WrapBox(&y[static_cast<size_t>(i)], box[1]);
+      WrapBox(&z[static_cast<size_t>(i)], box[2]);
+    }
+    const tilemd::AttentionResult second = tilemd::WarpLaneAttention(
+        potential, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+    for (int i = 0; i < n; ++i) {
+      vx[static_cast<size_t>(i)] += half * second.fx[static_cast<size_t>(i)];
+      vy[static_cast<size_t>(i)] += half * second.fy[static_cast<size_t>(i)];
+      vz[static_cast<size_t>(i)] += half * second.fz[static_cast<size_t>(i)];
+    }
+  }
+  const tilemd::AttentionResult final_force =
+      tilemd::WarpLaneAttention(potential, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  std::ifstream in(ref);
+  int n_ref = 0;
+  double box_ref[3];
+  double dt_ref = 0.0;
+  int steps_ref = 0;
+  double energy = 0.0;
+  in >> n_ref >> box_ref[0] >> box_ref[1] >> box_ref[2] >> dt_ref >> steps_ref >> energy;
+  ASSERT_EQ(n_ref, n);
+  ASSERT_EQ(steps_ref, steps);
+  double max_dx = 0.0;
+  double max_dv = 0.0;
+  for (int i = 0; i < n; ++i) {
+    double rx = 0.0;
+    double ry = 0.0;
+    double rz = 0.0;
+    double rvx = 0.0;
+    double rvy = 0.0;
+    double rvz = 0.0;
+    in >> rx >> ry >> rz >> rvx >> rvy >> rvz;
+    const double dx = x[static_cast<size_t>(i)] - rx -
+                      box[0] * std::rint((x[static_cast<size_t>(i)] - rx) / box[0]);
+    const double dy = y[static_cast<size_t>(i)] - ry -
+                      box[1] * std::rint((y[static_cast<size_t>(i)] - ry) / box[1]);
+    const double dz = z[static_cast<size_t>(i)] - rz -
+                      box[2] * std::rint((z[static_cast<size_t>(i)] - rz) / box[2]);
+    max_dx = std::max(max_dx, std::sqrt(dx * dx + dy * dy + dz * dz));
+    const double dvx = vx[static_cast<size_t>(i)] - rvx;
+    const double dvy = vy[static_cast<size_t>(i)] - rvy;
+    const double dvz = vz[static_cast<size_t>(i)] - rvz;
+    max_dv = std::max(max_dv, std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz));
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  std::cout << std::scientific << std::setprecision(8) << "eam warp nve 100 max |dx| " << max_dx
+            << " max |dv| " << max_dv << " energy " << final_force.potential_energy << " lammps "
+            << energy << "\n";
+  EXPECT_LT(max_dx, 1.0e-8);
+  EXPECT_LT(max_dv, 1.0e-8);
+  EXPECT_NEAR(final_force.potential_energy, energy, 1.0e-6 * (1.0 + std::abs(energy)));
+}
+
 std::string CuNiPotential() {
   const std::filesystem::path bundled =
       std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "CuNi.eam.alloy";
@@ -583,6 +684,21 @@ TEST(PairAttention, SetflCuNiMatchesLammps) {
   const double tile_error = RelativeForce(from_tiles.fx, from_tiles.fy, from_tiles.fz, fx, fy, fz);
   EXPECT_LT(tile_error, 1.0e-5);
   EXPECT_NEAR(from_tiles.potential_energy, energy, 1.0e-8 * (1.0 + std::abs(energy)));
+  tilemd::EamSetfl lanes(table);
+  lanes.SetAtoms(type.data(), n);
+  const tilemd::AttentionResult from_lanes =
+      tilemd::WarpLaneAttention(lanes, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const double lane_error = RelativeForce(from_lanes.fx, from_lanes.fy, from_lanes.fz,
+                                          from_tiles.fx, from_tiles.fy, from_tiles.fz);
+  std::cout << std::scientific << std::setprecision(8) << "setfl warp lane vs tiles force_rel "
+            << lane_error << "\n";
+  EXPECT_LT(lane_error, 1.0e-9);
+  EXPECT_NEAR(from_lanes.potential_energy, from_tiles.potential_energy,
+              1.0e-9 * (1.0 + std::abs(from_tiles.potential_energy)));
+  for (int k = 0; k < 6; ++k) {
+    EXPECT_NEAR(from_lanes.virial[k], from_tiles.virial[k],
+                1.0e-9 * (1.0 + std::abs(from_tiles.virial[k])));
+  }
 }
 
 void CuNiStart(std::vector<double>& x, std::vector<double>& y, std::vector<double>& z,
@@ -597,18 +713,31 @@ void CuNiStart(std::vector<double>& x, std::vector<double>& y, std::vector<doubl
   vz = {-0.29602650631979388, 0.10397349368020617, 0.50397349368020616, -0.29602650631979388};
 }
 
+enum class PairWalk { Full, Tiles, Lanes };
+
+tilemd::AttentionResult WalkSetfl(PairWalk walk, tilemd::EamSetfl& potential, double box[3],
+                                  const std::vector<double>& x, const std::vector<double>& y,
+                                  const std::vector<double>& z, const std::vector<int>& type) {
+  const int n = static_cast<int>(x.size());
+  if (walk == PairWalk::Lanes) {
+    return tilemd::WarpLaneAttention(potential, box, x.data(), y.data(), z.data(), type.data(), n,
+                                     0.3);
+  }
+  if (walk == PairWalk::Tiles) {
+    return tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(), type.data(),
+                                          n, 0.3);
+  }
+  return tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(), n);
+}
+
 void RunCuNiNve(tilemd::EamSetfl& potential, double box[3], std::vector<double>& x,
                 std::vector<double>& y, std::vector<double>& z, std::vector<double>& vx,
                 std::vector<double>& vy, std::vector<double>& vz, const std::vector<int>& type,
-                int steps, bool tiles) {
+                int steps, PairWalk walk) {
   const int n = static_cast<int>(x.size());
   const double dt = 0.001;
   for (int step = 0; step < steps; ++step) {
-    const tilemd::AttentionResult force =
-        tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
-                                               type.data(), n, 0.3)
-              : tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(),
-                                          n);
+    const tilemd::AttentionResult force = WalkSetfl(walk, potential, box, x, y, z, type);
     for (int i = 0; i < n; ++i) {
       const double half =
           0.5 * dt * tilemd::kMetalFtm2v / potential.Mass(type[static_cast<size_t>(i)]);
@@ -622,11 +751,7 @@ void RunCuNiNve(tilemd::EamSetfl& potential, double box[3], std::vector<double>&
       WrapBox(&y[static_cast<size_t>(i)], box[1]);
       WrapBox(&z[static_cast<size_t>(i)], box[2]);
     }
-    const tilemd::AttentionResult second =
-        tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
-                                               type.data(), n, 0.3)
-              : tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(),
-                                          n);
+    const tilemd::AttentionResult second = WalkSetfl(walk, potential, box, x, y, z, type);
     for (int i = 0; i < n; ++i) {
       const double half =
           0.5 * dt * tilemd::kMetalFtm2v / potential.Mass(type[static_cast<size_t>(i)]);
@@ -662,7 +787,7 @@ void ExpectCuNiNve(const std::filesystem::path& ref, double position_tolerance) 
         rvx[static_cast<size_t>(i)] >> rvy[static_cast<size_t>(i)] >> rvz[static_cast<size_t>(i)];
   }
   ASSERT_TRUE(static_cast<bool>(in));
-  for (const bool tiles : {false, true}) {
+  for (const PairWalk walk : {PairWalk::Full, PairWalk::Tiles, PairWalk::Lanes}) {
     std::vector<double> x;
     std::vector<double> y;
     std::vector<double> z;
@@ -673,12 +798,8 @@ void ExpectCuNiNve(const std::filesystem::path& ref, double position_tolerance) 
     CuNiStart(x, y, z, vx, vy, vz, type);
     tilemd::EamSetfl potential(table);
     potential.SetAtoms(type.data(), n);
-    RunCuNiNve(potential, box, x, y, z, vx, vy, vz, type, steps_ref, tiles);
-    const tilemd::AttentionResult final_force =
-        tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
-                                               type.data(), n, 0.3)
-              : tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(),
-                                          n);
+    RunCuNiNve(potential, box, x, y, z, vx, vy, vz, type, steps_ref, walk);
+    const tilemd::AttentionResult final_force = WalkSetfl(walk, potential, box, x, y, z, type);
     double max_dx = 0.0;
     double max_dv = 0.0;
     for (int i = 0; i < n; ++i) {
@@ -697,8 +818,11 @@ void ExpectCuNiNve(const std::filesystem::path& ref, double position_tolerance) 
       const double dvz = vz[static_cast<size_t>(i)] - rvz[static_cast<size_t>(i)];
       max_dv = std::max(max_dv, std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz));
     }
-    std::cout << std::scientific << std::setprecision(8) << "setfl nve " << steps_ref << " tiles "
-              << tiles << " max |dx| " << max_dx << " max |dv| " << max_dv << " energy "
+    const char* walk_name = "full";
+    if (walk == PairWalk::Tiles) walk_name = "tiles";
+    if (walk == PairWalk::Lanes) walk_name = "lanes";
+    std::cout << std::scientific << std::setprecision(8) << "setfl nve " << steps_ref << " "
+              << walk_name << " max |dx| " << max_dx << " max |dv| " << max_dv << " energy "
               << final_force.potential_energy << " lammps " << energy << "\n";
     EXPECT_LT(max_dx, position_tolerance);
     EXPECT_LT(max_dv, position_tolerance);
