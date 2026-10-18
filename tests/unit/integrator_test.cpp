@@ -97,6 +97,26 @@ TEST(Integrator, LeapfrogMatchesVerletFor100Steps) {
   EXPECT_LT(max_v, 1.0e-8) << "integer-time velocity delta after 100 steps";
 }
 
+TEST(Integrator, HalfStepAverageRecoversThePreMoveVelocity) {
+  tilemd::ref::System origin = SmallMelt();
+  std::vector<double> vx(40, 0.2);
+  std::vector<double> vy(40, -0.1);
+  std::vector<double> vz(40, 0.05);
+  constexpr double dt = 0.005;
+  constexpr double mass = 1.0;
+  tilemd::ref::Dynamics start = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::System system = origin;
+  tilemd::ref::Dynamics half = start;
+  tilemd::ref::PrepareLeapfrog(system, half, dt, mass);
+  std::vector<double> recovered_x;
+  std::vector<double> recovered_y;
+  std::vector<double> recovered_z;
+  tilemd::ref::IntegerTimeVelocity(system, half, dt, mass, recovered_x, recovered_y, recovered_z);
+  EXPECT_EQ(MaxAbs(start.vx, recovered_x), 0.0);
+  EXPECT_EQ(MaxAbs(start.vy, recovered_y), 0.0);
+  EXPECT_EQ(MaxAbs(start.vz, recovered_z), 0.0);
+}
+
 tilemd::ref::Observables ForceFromFloatCoordinates(tilemd::ref::System system,
                                                    const tilemd::ref::Dynamics& state) {
   const int n = tilemd::ref::NumAtoms(system);

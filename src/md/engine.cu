@@ -61,16 +61,7 @@ struct ThermoRecord {
   double wyz;
 };
 
-struct ThermoPartial {
-  double ke;
-  double pe;
-  double wxx;
-  double wyy;
-  double wzz;
-  double wxy;
-  double wxz;
-  double wyz;
-};
+using ThermoPartial = TileThermoPartial;
 
 #define TILEMD_CHECK(call)                                                               \
   do {                                                                                   \
@@ -485,6 +476,30 @@ __global__ void FinishThermo(const ThermoPartial* partial, int npartial, ThermoR
   *thermo_count = slot + 1;
 }
 
+__global__ void FinishTileThermo(const ThermoPartial* partial, int npartial, ThermoRecord* ring,
+                                 int capacity, int* thermo_count, int step, DeviceStatus* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  ThermoRecord rec{};
+  rec.step = step;
+  for (int b = 0; b < npartial; ++b) {
+    rec.ke += partial[b].ke;
+    rec.pe += partial[b].pe;
+    rec.wxx += partial[b].wxx;
+    rec.wyy += partial[b].wyy;
+    rec.wzz += partial[b].wzz;
+    rec.wxy += partial[b].wxy;
+    rec.wxz += partial[b].wxz;
+    rec.wyz += partial[b].wyz;
+  }
+  int slot = *thermo_count;
+  if (slot >= capacity) {
+    status->overflow = 1;
+    return;
+  }
+  ring[slot] = rec;
+  *thermo_count = slot + 1;
+}
+
 __global__ void IncrementStep(int* step) {
   if (blockIdx.x == 0 && threadIdx.x == 0) *step += 1;
 }
@@ -688,6 +703,8 @@ struct Engine::Impl {
   int* tile_cj = nullptr;
   int* tile_shift = nullptr;
   int* tile_missing = nullptr;
+  TileThermoPartial* tile_partial = nullptr;
+  int tile_partial_cap = 0;
   int tile_ncluster = 0;
   int tile_slot_cap = 0;
   int tile_ci_cap = 0;
@@ -716,6 +733,7 @@ struct Engine::Impl {
   bool TileListStale();
   void RebuildTileCache(float4* pos_cur);
   void LaunchTileStep(float4* pos_cur, float4* pos_out);
+  void RecordClosingTileThermo();
   void RunClusterTiles(int steps);
   GpuForces DownloadForces(int overflow);
 
@@ -739,6 +757,7 @@ struct Engine::Impl {
     cudaFree(tile_cj);
     cudaFree(tile_shift);
     cudaFree(tile_missing);
+    cudaFree(tile_partial);
     cudaFree(fx);
     cudaFree(fy);
     cudaFree(fz);
@@ -1462,11 +1481,84 @@ void Engine::Impl::LaunchTileStep(float4* pos_cur, float4* pos_out) {
   LjShift lj_shift = LjShift::None;
   if (system.shift == Shift::Energy) lj_shift = LjShift::Energy;
   if (system.shift == Shift::Force) lj_shift = LjShift::Force;
+  int record = -1;
+  if (system.thermo_every > 0) {
+    int step = 0;
+    TILEMD_CHECK(cudaMemcpy(&step, step_counter, sizeof(step), cudaMemcpyDeviceToHost));
+    if (step % system.thermo_every == 0) record = step;
+  }
+  if (record >= 0 && tile_ncluster > tile_partial_cap) {
+    cudaFree(tile_partial);
+    tile_partial = static_cast<TileThermoPartial*>(
+        MustMalloc(sizeof(TileThermoPartial) * static_cast<size_t>(tile_ncluster)));
+    tile_partial_cap = tile_ncluster;
+  }
   LaunchFusedTileDevice(tile_ncluster, tile_type, tile_gid, tile_ci, tile_cj, tile_shift,
                         tile_missing, system.box, coeffs.data(), static_cast<int>(coeffs.size()),
                         lj_shift, x, y, z, vx, vy, vz, imgx, imgy, imgz, pos_cur, pos_out, xref,
-                        status, step_counter, system.dt, 1.0 / system.mass);
+                        status, step_counter, system.dt, 1.0 / system.mass, tile_partial, record);
+  if (record >= 0 && tile_ncluster > 0) {
+    FinishTileThermo<<<1, 1>>>(tile_partial, tile_ncluster, thermo_ring, kThermoRing, thermo_count,
+                               record, status);
+    CheckLaunch();
+    DrainDeviceThermo();
+  }
   forces_ready = false;
+}
+
+void Engine::Impl::RecordClosingTileThermo() {
+  int step = 0;
+  TILEMD_CHECK(cudaMemcpy(&step, step_counter, sizeof(step), cudaMemcpyDeviceToHost));
+  if (system.thermo_every <= 0 || step % system.thermo_every != 0 || n <= 0) return;
+  std::vector<double> hx(static_cast<size_t>(n));
+  std::vector<double> hy(static_cast<size_t>(n));
+  std::vector<double> hz(static_cast<size_t>(n));
+  std::vector<double> hvx(static_cast<size_t>(n));
+  std::vector<double> hvy(static_cast<size_t>(n));
+  std::vector<double> hvz(static_cast<size_t>(n));
+  std::vector<int> htype(static_cast<size_t>(n));
+  TILEMD_CHECK(cudaMemcpy(hx.data(), x, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  TILEMD_CHECK(cudaMemcpy(hy.data(), y, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  TILEMD_CHECK(cudaMemcpy(hz.data(), z, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  TILEMD_CHECK(cudaMemcpy(hvx.data(), vx, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  TILEMD_CHECK(cudaMemcpy(hvy.data(), vy, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  TILEMD_CHECK(cudaMemcpy(hvz.data(), vz, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  TILEMD_CHECK(cudaMemcpy(htype.data(), type, sizeof(int) * n, cudaMemcpyDeviceToHost));
+  double max_cut = 0.0;
+  std::vector<LjPair> coeffs;
+  coeffs.reserve(system.pairs.size());
+  for (const PairSpec& spec : system.pairs) {
+    LjPair row;
+    row.type_i = spec.type_i;
+    row.type_j = spec.type_j;
+    row.epsilon = spec.epsilon;
+    row.sigma = spec.sigma;
+    row.cutoff = spec.cutoff;
+    coeffs.push_back(row);
+    max_cut = std::max(max_cut, spec.cutoff);
+  }
+  LjShift lj_shift = LjShift::None;
+  if (system.shift == Shift::Energy) lj_shift = LjShift::Energy;
+  if (system.shift == Shift::Force) lj_shift = LjShift::Force;
+  const ClusterGrid grid = BuildClusterGrid(system.box, hx.data(), hy.data(), hz.data(),
+                                            htype.data(), n, max_cut + system.skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  const TileDeviceForces raw =
+      RunTileForceGpu(grid, list, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift);
+  const double half = 0.5 * system.dt / system.mass;
+  double ke = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const double ivx = hvx[static_cast<size_t>(i)] + half * raw.fx[static_cast<size_t>(i)];
+    const double ivy = hvy[static_cast<size_t>(i)] + half * raw.fy[static_cast<size_t>(i)];
+    const double ivz = hvz[static_cast<size_t>(i)] + half * raw.fz[static_cast<size_t>(i)];
+    ke += 0.5 * (ivx * ivx + ivy * ivy + ivz * ivz);
+  }
+  ThermoSample sample;
+  sample.step = step;
+  sample.kinetic_energy = ke;
+  sample.potential_energy = raw.potential_energy;
+  for (int axis = 0; axis < 6; ++axis) sample.virial[axis] = raw.virial[axis];
+  drained.push_back(sample);
 }
 
 void Engine::Impl::RunClusterTiles(int steps) {
@@ -1493,6 +1585,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
     std::swap(latest, other);
   }
   if (latest != pos) std::swap(pos, pos_next);
+  RecordClosingTileThermo();
 }
 
 void Engine::Impl::RecordInitialThermo() {

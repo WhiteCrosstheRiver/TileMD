@@ -57,6 +57,17 @@ __device__ double ReduceLane(double value, int i_local) {
   return sum;
 }
 
+__device__ double ShflXorDouble(double value, int lane_mask) {
+  const int lo = __shfl_xor_sync(0xffffffffu, __double2loint(value), lane_mask);
+  const int hi = __shfl_xor_sync(0xffffffffu, __double2hiint(value), lane_mask);
+  return __hiloint2double(hi, lo);
+}
+
+__device__ double WarpSum(double value) {
+  for (int offset = 16; offset > 0; offset >>= 1) value += ShflXorDouble(value, offset);
+  return value;
+}
+
 __device__ void DecodeTileShift(int shift, int* sx, int* sy, int* sz) {
   *sx = shift % 3 - 1;
   *sy = (shift / 3) % 3 - 1;
@@ -101,6 +112,8 @@ struct TileIntegrate {
   int* step_counter = nullptr;
   double dt = 0.0;
   double inv_mass = 0.0;
+  TileThermoPartial* partial = nullptr;
+  int record_step = -1;
 };
 
 template <bool kIntegrate>
@@ -146,6 +159,7 @@ __global__ void __launch_bounds__(32)
   double axz = 0.0;
   double ayz = 0.0;
 
+  const bool ev = !kIntegrate || integrate.record_step >= 0;
   const int begin = ci_start[ci];
   const int end = ci_start[ci + 1];
   for (int pair0 = begin; pair0 < end; pair0 += 4) {
@@ -200,10 +214,11 @@ __global__ void __launch_bounds__(32)
       const double sr2 = row.sigma2 * inv_r2;
       const double sr6 = sr2 * sr2 * sr2;
       double s = row.eps24 * inv_r2 * sr6 * (2.0 * sr6 - 1.0);
-      double u = row.eps4 * sr6 * (sr6 - 1.0) - row.u_shift;
+      double u = 0.0;
+      if (ev) u = row.eps4 * sr6 * (sr6 - 1.0) - row.u_shift;
       if (c_tile_shift == 2) {
         const double r = sqrt(r2);
-        u += (r - row.rc) * row.s_rc * row.rc;
+        if (ev) u += (r - row.rc) * row.s_rc * row.rc;
         s -= row.s_rc * row.rc / r;
       }
       const double pfx = s * dx;
@@ -212,13 +227,15 @@ __global__ void __launch_bounds__(32)
       ax += pfx;
       ay += pfy;
       az += pfz;
-      ae += 0.5 * u;
-      axx += 0.5 * dx * pfx;
-      ayy += 0.5 * dy * pfy;
-      azz += 0.5 * dz * pfz;
-      axy += 0.5 * dx * pfy;
-      axz += 0.5 * dx * pfz;
-      ayz += 0.5 * dy * pfz;
+      if (ev) {
+        ae += 0.5 * u;
+        axx += 0.5 * dx * pfx;
+        ayy += 0.5 * dy * pfy;
+        azz += 0.5 * dz * pfz;
+        axy += 0.5 * dx * pfy;
+        axz += 0.5 * dx * pfz;
+        ayz += 0.5 * dy * pfz;
+      }
     }
   }
 
@@ -233,23 +250,27 @@ __global__ void __launch_bounds__(32)
   const double rxz = ReduceLane(axz, i_local);
   const double ryz = ReduceLane(ayz, i_local);
   if constexpr (kIntegrate) {
-    (void)re;
-    (void)rxx;
-    (void)ryy;
-    (void)rzz;
-    (void)rxy;
-    (void)rxz;
-    (void)ryz;
     double xn = 0.0;
     double yn = 0.0;
     double zn = 0.0;
+    double vxn = 0.0;
+    double vyn = 0.0;
+    double vzn = 0.0;
+    double ke_lane = 0.0;
+    double pe_lane = 0.0;
+    double xx_lane = 0.0;
+    double yy_lane = 0.0;
+    double zz_lane = 0.0;
+    double xy_lane = 0.0;
+    double xz_lane = 0.0;
+    double yz_lane = 0.0;
     int atom_id = -1;
     if (j_sub == 0 && ti != kMaskType) {
       atom_id = gid[slot_i];
       const double scale = integrate.dt * integrate.inv_mass;
-      const double vxn = integrate.vx[atom_id] + scale * rx;
-      const double vyn = integrate.vy[atom_id] + scale * ry;
-      const double vzn = integrate.vz[atom_id] + scale * rz;
+      vxn = integrate.vx[atom_id] + scale * rx;
+      vyn = integrate.vy[atom_id] + scale * ry;
+      vzn = integrate.vz[atom_id] + scale * rz;
       xn = WrapTile(integrate.x[atom_id] + integrate.dt * vxn, c_tile_box[0],
                     integrate.imgx + atom_id);
       yn = WrapTile(integrate.y[atom_id] + integrate.dt * vyn, c_tile_box[1],
@@ -264,6 +285,32 @@ __global__ void __launch_bounds__(32)
       integrate.z[atom_id] = zn;
       integrate.pos_next[atom_id] = make_float4(static_cast<float>(xn), static_cast<float>(yn),
                                                 static_cast<float>(zn), __int_as_float(ti));
+    }
+    if (integrate.record_step >= 0 && j_sub == 0 && atom_id >= 0) {
+      const double half_scale = 0.5 * integrate.dt * integrate.inv_mass;
+      const double vix = vxn - half_scale * rx;
+      const double viy = vyn - half_scale * ry;
+      const double viz = vzn - half_scale * rz;
+      ke_lane = 0.5 * (vix * vix + viy * viy + viz * viz);
+      pe_lane = re;
+      xx_lane = rxx;
+      yy_lane = ryy;
+      zz_lane = rzz;
+      xy_lane = rxy;
+      xz_lane = rxz;
+      yz_lane = ryz;
+    }
+    if (integrate.record_step >= 0 && integrate.partial != nullptr) {
+      TileThermoPartial out;
+      out.ke = WarpSum(ke_lane);
+      out.pe = WarpSum(pe_lane);
+      out.wxx = WarpSum(xx_lane);
+      out.wyy = WarpSum(yy_lane);
+      out.wzz = WarpSum(zz_lane);
+      out.wxy = WarpSum(xy_lane);
+      out.wxz = WarpSum(xz_lane);
+      out.wyz = WarpSum(yz_lane);
+      if (lane == 0) integrate.partial[ci] = out;
     }
     float disp2 = 0.f;
     if (atom_id >= 0 && integrate.xref != nullptr) {
@@ -535,7 +582,7 @@ void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const 
                            double* atom_y, double* atom_z, double* vx, double* vy, double* vz,
                            int* imgx, int* imgy, int* imgz, float4* pos_cur, float4* pos_next,
                            float4* xref, void* status, int* step_counter, double dt,
-                           double inv_mass) {
+                           double inv_mass, TileThermoPartial* partial, int record_step) {
   if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
   if (!(dt > 0.0) || !(inv_mass > 0.0)) {
     throw std::invalid_argument("dt and inverse mass must be positive");
@@ -592,6 +639,8 @@ void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const 
   step.step_counter = step_counter;
   step.dt = dt;
   step.inv_mass = inv_mass;
+  step.partial = partial;
+  step.record_step = record_step;
   TileForceKernel<true><<<ncluster, 32>>>(
       nullptr, nullptr, nullptr, type, gid, ci_start, cj, image, nullptr, nullptr, nullptr, nullptr,
       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, ncluster, missing, step);
