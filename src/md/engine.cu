@@ -100,7 +100,7 @@ __device__ double MinImageDouble(double delta, double length) {
 }
 
 // 10-bit Morton code. Stage-1 boxes stay under 1024 cells per axis.
-__device__ unsigned Spread10(unsigned v) {
+__host__ __device__ unsigned Spread10(unsigned v) {
   v &= 0x3ffu;
   v = (v | (v << 16)) & 0x030000FFu;
   v = (v | (v << 8)) & 0x0300F00Fu;
@@ -109,7 +109,7 @@ __device__ unsigned Spread10(unsigned v) {
   return v;
 }
 
-__device__ int MortonCell(int ix, int iy, int iz) {
+__host__ __device__ int MortonCell(int ix, int iy, int iz) {
   unsigned code = Spread10(static_cast<unsigned>(ix)) | (Spread10(static_cast<unsigned>(iy)) << 1) |
                   (Spread10(static_cast<unsigned>(iz)) << 2);
   return static_cast<int>(code);
@@ -242,9 +242,8 @@ __global__ void __launch_bounds__(kBlock)
   for (int dz = -1; dz <= 1; ++dz) {
     for (int dy = -1; dy <= 1; ++dy) {
       for (int dx = -1; dx <= 1; ++dx) {
-        int cell =
-            WrapCell(ix, c_ncell[0], dx) +
-            c_ncell[0] * (WrapCell(iy, c_ncell[1], dy) + c_ncell[1] * WrapCell(iz, c_ncell[2], dz));
+        int cell = MortonCell(WrapCell(ix, c_ncell[0], dx), WrapCell(iy, c_ncell[1], dy),
+                              WrapCell(iz, c_ncell[2], dz));
         for (int s = cell_start[cell]; s < cell_start[cell + 1]; ++s) {
           int j = cell_atoms[s];
           if (j == i) continue;
@@ -966,7 +965,11 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
       if (impl_->ncell[dim] < 3) throw std::runtime_error("box too small for 3 cells");
       if (impl_->ncell[dim] > 1024) throw std::runtime_error("more than 1024 cells on one axis");
     }
-    impl_->ncell_tot = impl_->ncell[0] * impl_->ncell[1] * impl_->ncell[2];
+    // cell_start is indexed by the Morton code, including the sentinel after the
+    // last cell. A linear cell count is smaller than that code, so the old
+    // length wrote past the array and the stencil read the wrong range.
+    const int last_code = MortonCell(impl_->ncell[0] - 1, impl_->ncell[1] - 1, impl_->ncell[2] - 1);
+    impl_->ncell_tot = last_code + 1;
 
     if (in.max_neigh > 0) {
       impl_->max_neigh = in.max_neigh;

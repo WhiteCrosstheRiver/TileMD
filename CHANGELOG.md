@@ -12,6 +12,7 @@
 - M3 RDF on the 32k melt. The L1 distance to LAMMPS g(r) is 0.00147, inside the 0.02 gate.
 - M3 32k drift, 10^6 steps of shifted-force LJ. The least-squares slope of the recorded energy per atom is −3.55e-10 per τ for TileMD and +1.52e-10 per τ for LAMMPS. The absolute ratio is 2.33, outside the 2× gate. Both slopes sit inside two standard errors of zero. The TileMD samples were written with six significant digits.
 - M4 stable Morton reorder at each neighbor rebuild, with output still in the original atom order.
+- M4 neighbor stencil uses the Morton code of the cell. The old linear index read the wrong range. On an RTX 3050 the GPU suite passes: seven fixtures, a bitwise 10 000-step pair, the skin rebuild, the 32k thermo comparison, the cluster-tile kernel, LJ attention within 1e-10, a 64-atom device cluster rebuild, and both EAM kernels within 1e-9 of the lane walk. The fused kernel, the block-size sweep, and the G5 timing are not measured.
 - M4 device-side rebuild decision. The step loop no longer copies status back on every step.
 - M4 CUDA graph of 50 steps, with a segment snapshot that restores and grows the list on overflow.
 - M4 energy and virial only on thermo steps, reduced on device into a ring drained at segment boundaries.
