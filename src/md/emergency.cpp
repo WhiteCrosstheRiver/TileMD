@@ -14,8 +14,9 @@ std::string NonFiniteMessage(int step, int gid) {
 
 void WriteEmergencyFrame(const std::string& path, const double* box, const double* x,
                          const double* y, const double* z, const double* vx, const double* vy,
-                         const double* vz, const int* type, const int* gid, int n, int step) {
-  std::ofstream out(path);
+                         const double* vz, const int* type, const int* gid, int n, int step,
+                         bool append) {
+  std::ofstream out(path, append ? std::ios::app : std::ios::out);
   if (!out) throw std::runtime_error("cannot write " + path);
   out.setf(std::ios::scientific);
   out.precision(17);

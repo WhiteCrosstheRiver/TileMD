@@ -32,6 +32,18 @@ inline int FusedLatestBuffer(int steps) {
   return steps % 2;
 }
 
+// Host segment. Dumps need the positions, so the segment stops at the next
+// dump step. `dump_every <= 0` keeps the segment at `segment_max`.
+inline int SegmentUntilDump(int done, int remaining, int dump_every, int segment_max) {
+  if (segment_max < 1) throw std::invalid_argument("segment length must be positive");
+  if (done < 0 || remaining < 0) throw std::invalid_argument("step count must be non-negative");
+  const int cap = std::min(remaining, segment_max);
+  if (dump_every <= 0) return cap;
+  const int mod = done % dump_every;
+  const int until = mod == 0 ? dump_every : dump_every - mod;
+  return std::min(cap, until);
+}
+
 inline SegmentLaunch SegmentSteps(int segment, int unroll) {
   if (unroll < 1) throw std::invalid_argument("graph_unroll must be positive");
   if (segment < 0) throw std::invalid_argument("segment length must be non-negative");

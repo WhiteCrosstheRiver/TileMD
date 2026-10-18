@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 namespace tilemd {
@@ -33,6 +34,10 @@ struct HostSystem {
   // 0 keeps energy and virial off the step path. Otherwise the device writes a
   // thermo record when the completed step is a multiple of this interval.
   int thermo_every = 0;
+  // 0 does not write. Otherwise `Run` ends a segment at the next multiple and
+  // appends an extended-XYZ frame in original-gid order to `dump_path`.
+  int dump_every = 0;
+  std::string dump_path;
   // Cluster tiles replace the atom neighbor list for forces and integration.
   // The default remains the atom-neighbor engine.
   bool use_cluster_tiles = false;

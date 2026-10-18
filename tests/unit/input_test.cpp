@@ -14,6 +14,7 @@
 
 #include "force/eam.hpp"
 #include "io/run.hpp"
+#include "md/emergency.hpp"
 #include "md/run_plan.hpp"
 
 namespace {
@@ -88,6 +89,44 @@ TEST(Input, GraphUnrollSetsTheCapturedGroup) {
   EXPECT_EQ(tilemd::FusedLatestBuffer(1), 1);
   EXPECT_EQ(tilemd::FusedLatestBuffer(8), 0);
   EXPECT_THROW(tilemd::FusedLatestBuffer(-1), std::invalid_argument);
+  EXPECT_EQ(tilemd::SegmentUntilDump(0, 2500, 0, 1000), 1000);
+  EXPECT_EQ(tilemd::SegmentUntilDump(0, 1000, 100, 1000), 100);
+  EXPECT_EQ(tilemd::SegmentUntilDump(100, 900, 100, 1000), 100);
+  EXPECT_EQ(tilemd::SegmentUntilDump(50, 1000, 100, 1000), 50);
+  EXPECT_EQ(tilemd::SegmentUntilDump(0, 30, 100, 1000), 30);
+  EXPECT_EQ(tilemd::SegmentUntilDump(0, 1000, 1, 1000), 1);
+  EXPECT_THROW(tilemd::SegmentUntilDump(0, 10, 0, 0), std::invalid_argument);
+  EXPECT_THROW(tilemd::SegmentUntilDump(-1, 10, 0, 1000), std::invalid_argument);
+}
+
+TEST(Input, DumpFramesAppendInGidOrder) {
+  const double box[3] = {10.0, 10.0, 10.0};
+  const double x[2] = {0.2, 1.2};
+  const double y[2] = {0.3, 1.3};
+  const double z[2] = {0.4, 1.4};
+  const double vx[2] = {0.0, 0.1};
+  const double vy[2] = {0.0, 0.0};
+  const double vz[2] = {0.0, 0.0};
+  const int type[2] = {1, 0};
+  const int gid[2] = {1, 0};
+  const auto path = std::filesystem::temp_directory_path() / "tilemd-dump-append.extxyz";
+  tilemd::WriteEmergencyFrame(path.string(), box, x, y, z, vx, vy, vz, type, gid, 2, 0, false);
+  tilemd::WriteEmergencyFrame(path.string(), box, x, y, z, vx, vy, vz, type, gid, 2, 100, true);
+  std::ifstream in(path);
+  std::string line;
+  int frames = 0;
+  int step0 = 0;
+  int step100 = 0;
+  while (std::getline(in, line)) {
+    if (line == "2") ++frames;
+    if (line.find("step=0 ") != std::string::npos) ++step0;
+    if (line.find("step=100 ") != std::string::npos) ++step100;
+  }
+  in.close();
+  std::filesystem::remove(path);
+  EXPECT_EQ(frames, 2);
+  EXPECT_EQ(step0, 1);
+  EXPECT_EQ(step100, 1);
 }
 
 TEST(Input, VelocitiesRepeatForTheSameSeed) {

@@ -782,6 +782,7 @@ struct Engine::Impl {
   void Upload();
   void ClearFlags();
   [[noreturn]] void AbortIfNonFinite(int step, const DeviceStatus& host);
+  void WriteDump(int step, bool append);
   void BuildCells();
   void ApplySpatialOrder();
   void QueueRebuild(cudaStream_t stream);
@@ -1160,6 +1161,39 @@ void Engine::Impl::AbortIfNonFinite(int step, const DeviceStatus& host) {
   WriteEmergencyFrame("emergency.extxyz", system.box, hx.data(), hy.data(), hz.data(), hvx.data(),
                       hvy.data(), hvz.data(), htype.data(), hgid.data(), n, step);
   throw std::runtime_error(NonFiniteMessage(step, original));
+}
+
+void ScatterToGid(const double* src, const int* gid, int n, std::vector<double>& dst);
+
+void Engine::Impl::WriteDump(int step, bool append) {
+  if (system.dump_every <= 0 || system.dump_path.empty()) return;
+  std::vector<double> hx;
+  std::vector<double> hy;
+  std::vector<double> hz;
+  std::vector<double> hvx;
+  std::vector<double> hvy;
+  std::vector<double> hvz;
+  ScatterToGid(x, gid, n, hx);
+  ScatterToGid(y, gid, n, hy);
+  ScatterToGid(z, gid, n, hz);
+  ScatterToGid(vx, gid, n, hvx);
+  ScatterToGid(vy, gid, n, hvy);
+  ScatterToGid(vz, gid, n, hvz);
+  std::vector<int> stored_type(static_cast<size_t>(std::max(n, 0)));
+  std::vector<int> hgid(stored_type.size());
+  std::vector<int> type_gid(stored_type.size());
+  std::vector<int> identity(stored_type.size());
+  if (n > 0) {
+    TILEMD_CHECK(cudaMemcpy(stored_type.data(), type, sizeof(int) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hgid.data(), gid, sizeof(int) * n, cudaMemcpyDeviceToHost));
+    for (int s = 0; s < n; ++s) {
+      type_gid[static_cast<size_t>(hgid[static_cast<size_t>(s)])] =
+          stored_type[static_cast<size_t>(s)];
+      identity[static_cast<size_t>(s)] = s;
+    }
+  }
+  WriteEmergencyFrame(system.dump_path, system.box, hx.data(), hy.data(), hz.data(), hvx.data(),
+                      hvy.data(), hvz.data(), type_gid.data(), identity.data(), n, step, append);
 }
 
 void Engine::Impl::ClearFlags() {
@@ -1888,13 +1922,22 @@ void Engine::Impl::RunClusterTiles(int steps) {
   }
   float4* latest = pos;
   float4* other = pos_next;
+  const int dump_every = system.dump_path.empty() ? 0 : system.dump_every;
+  if (dump_every > 0) WriteDump(0, false);
   if (!FusedGraphOk(system.rebuild_every_step)) {
-    RunTileSteps(steps, latest, other);
+    int done = 0;
+    while (done < steps) {
+      const int chunk = SegmentUntilDump(done, steps - done, dump_every, std::max(steps, 1));
+      RunTileSteps(chunk, latest, other);
+      done += chunk;
+      if (dump_every > 0 && done % dump_every == 0) WriteDump(done, true);
+    }
   } else {
     int done = 0;
     while (done < steps) {
       int unroll = GraphUnroll(system.graph_unroll, steps - done);
       if (system.thermo_every > 0) unroll = std::min(unroll, kThermoRing);
+      unroll = SegmentUntilDump(done, steps - done, dump_every, unroll);
       const bool host_rebuilt = TileListStale();
       if (host_rebuilt) RebuildTileCache(latest);
       PrepareTileRebuild(host_rebuilt);
@@ -1962,6 +2005,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
         }
       }
       done += unroll;
+      if (dump_every > 0 && done % dump_every == 0) WriteDump(done, true);
     }
   }
   if (latest != pos) std::swap(pos, pos_next);
@@ -2104,12 +2148,15 @@ void Engine::Run(int steps) {
     impl_->ComputeForce();
   }
   impl_->RecordInitialThermo();
+  const int dump_every = impl_->system.dump_path.empty() ? 0 : impl_->system.dump_every;
+  if (dump_every > 0) impl_->WriteDump(0, false);
   if (steps == 0) {
     impl_->forces_ready = true;
     return;
   }
   // One captured step-group, replayed without a host sync inside the group.
   // Status is read at segment boundaries. graph_unroll is K in PLAN.md, default 50.
+  // A dump ends the segment early so the frame is the positions at that step.
   constexpr int kSegment = 1000;
   const int unroll = GraphUnroll(impl_->system.graph_unroll, steps);
   GraphHold graph;
@@ -2117,7 +2164,7 @@ void Engine::Run(int steps) {
   impl_->Capture(graph.stream, unroll, &graph.graph, &graph.exec);
   int done = 0;
   while (done < steps) {
-    const int segment = std::min(kSegment, steps - done);
+    const int segment = SegmentUntilDump(done, steps - done, dump_every, kSegment);
     int retries = 0;
     while (true) {
       impl_->Snapshot(graph.stream);
@@ -2149,6 +2196,7 @@ void Engine::Run(int steps) {
     }
     impl_->DrainDeviceThermo();
     done += segment;
+    if (dump_every > 0 && done % dump_every == 0) impl_->WriteDump(done, true);
   }
   impl_->forces_ready = true;
 }
