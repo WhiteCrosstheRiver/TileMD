@@ -24,7 +24,9 @@ Velocity Verlet uses mass 1. Inside `Run`, the displacement check is a block red
 
 ## Cluster pairs
 
-The CPU builder in `src/neighbor/cluster_list.cpp` is the M5 list, before the tile force kernel. Columns lie on an x–y grid. A zero column count picks a grid with about 32 atoms per column. Inside a column, atoms are stable-sorted by z and the length is padded to a multiple of 8. Padding slots use type `-1` and are omitted from the cluster bounding box, so the interaction mask is the type rather than a sentinel coordinate. A cluster pair is stored when the periodic bounding-box distance is below `reach`. The shift index packs `sx, sy, sz`, each in `{-1, 0, 1}`. `ComputeTileForces` walks that list in cluster order and applies the image shift stored with each pair. On a 40-atom shifted-force system it matches the double-precision oracle. The atom-neighbor engine does not call this builder yet.
+The CPU builder in `src/neighbor/cluster_list.cpp` is the M5 list. Columns lie on an x–y grid. A zero column count picks a grid with about 32 atoms per column. Inside a column, atoms are stable-sorted by z and the length is padded to a multiple of 8. Padding slots use type `-1` and are omitted from the cluster bounding box, so the interaction mask is the type rather than a sentinel coordinate. A cluster pair is stored when the periodic bounding-box distance is below `reach`. The shift index packs `sx, sy, sz`, each in `{-1, 0, 1}`. `ComputeTileForces` walks that list in cluster order and applies the image shift stored with each pair. On a 40-atom shifted-force system it matches the double-precision oracle.
+
+`src/md/tile_force.cu` is the matching GPU kernel: one warp per i-cluster, lane `i_local + 8 * j_sub`. Each group of four j-clusters is broadcast with warp shuffles, and the four lane partials are added in j-sub order. `HostSystem::use_cluster_tiles` selects this path for `ComputeForces` and for velocity Verlet. The cluster list is still built on the host at every force evaluation. The default engine remains the atom-neighbor list. Tile thermo and a device-side cluster rebuild are not on this path.
 
 ## CPU reference
 

@@ -15,3 +15,4 @@
 - M4 conditional graph node around the neighbor rebuild, with the early-exit kernels kept as the fallback.
 - M5 CPU cluster-pair list: x–y columns, stable z order, 8-atom clusters, bounding-box pruning.
 - M5 CPU tile force on that list, checked against the double-precision oracle.
+- M5 GPU tile force: one warp per cluster, selectable beside the atom-neighbor engine. The cluster list is still built on the host.

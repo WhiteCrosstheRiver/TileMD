@@ -28,6 +28,9 @@ struct HostSystem {
   // 0 keeps energy and virial off the step path. Otherwise the device writes a
   // thermo record when the completed step is a multiple of this interval.
   int thermo_every = 0;
+  // Cluster tiles replace the atom neighbor list for forces and integration.
+  // The default remains the atom-neighbor engine.
+  bool use_cluster_tiles = false;
   std::vector<int> type;
   std::vector<double> x;
   std::vector<double> y;

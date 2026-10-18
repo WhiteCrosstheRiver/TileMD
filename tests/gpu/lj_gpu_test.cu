@@ -432,3 +432,30 @@ TEST(GpuLj, ShortNveMatchesLammps) {
             << "\nT3 mean P " << Mean(press) << " lammps " << Mean(ref_press) << " stderr "
             << Stderr(press) << "\n";
 }
+
+TEST(GpuLj, ClusterTileMatchesOracle) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  tilemd::ref::System system;
+  system.box[0] = 8.0;
+  system.box[1] = 8.0;
+  system.box[2] = 8.0;
+  system.shift = tilemd::ref::Shift::Force;
+  system.pairs.push_back({0, 0, 1.0, 1.0, 2.5});
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<double> dist(0.5, 7.5);
+  for (int i = 0; i < 40; ++i) {
+    system.type.push_back(0);
+    system.x.push_back(dist(rng));
+    system.y.push_back(dist(rng));
+    system.z.push_back(dist(rng));
+  }
+  system.x[0] = 0.2;
+  system.x[1] = 7.9;
+  system.y[0] = system.y[1] = 4.0;
+  system.z[0] = system.z[1] = 4.0;
+  const tilemd::ref::Observables expected = tilemd::ref::Compute(system);
+  tilemd::HostSystem host = FromReference(system, 0.3, 64, true);
+  host.use_cluster_tiles = true;
+  tilemd::Engine engine(std::move(host));
+  ExpectClose(engine.ComputeForces(), expected, "cluster tiles");
+}

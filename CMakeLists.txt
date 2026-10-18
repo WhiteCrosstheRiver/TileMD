@@ -68,8 +68,8 @@ add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp)
 target_link_libraries(tilemd_cluster PUBLIC tilemd_headers)
 target_compile_features(tilemd_cluster PUBLIC cxx_std_17)
 
-add_library(tilemd_engine STATIC src/md/engine.cu)
-target_link_libraries(tilemd_engine PUBLIC tilemd_headers)
+add_library(tilemd_engine STATIC src/md/engine.cu src/md/tile_force.cu)
+target_link_libraries(tilemd_engine PUBLIC tilemd_headers tilemd_cluster)
 tilemd_apply_cuda_flags(tilemd_engine)
 
 # T4 and T5 are multi-minute runs, so they stay out of ctest.

@@ -16,6 +16,8 @@
 #include <utility>
 
 #include "core/device_status.hpp"
+#include "md/tile_force.hpp"
+#include "neighbor/cluster_list.hpp"
 
 namespace tilemd {
 
@@ -697,6 +699,8 @@ struct Engine::Impl {
   void ReallocList(int capacity);
   int BuildNeighbors(bool grow);
   void ComputeForce();
+  GpuForces TileForces();
+  void RunClusterTiles(int steps);
   GpuForces DownloadForces(int overflow);
 
   ~Impl() {
@@ -1291,6 +1295,73 @@ void Engine::Impl::ComputeForce() {
   forces_ready = true;
 }
 
+GpuForces Engine::Impl::TileForces() {
+  std::vector<double> hx(static_cast<size_t>(n));
+  std::vector<double> hy(static_cast<size_t>(n));
+  std::vector<double> hz(static_cast<size_t>(n));
+  std::vector<int> htype(static_cast<size_t>(n));
+  if (n > 0) {
+    TILEMD_CHECK(cudaMemcpy(hx.data(), x, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hy.data(), y, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(hz.data(), z, sizeof(double) * n, cudaMemcpyDeviceToHost));
+    TILEMD_CHECK(cudaMemcpy(htype.data(), type, sizeof(int) * n, cudaMemcpyDeviceToHost));
+  }
+  double max_cut = 0.0;
+  std::vector<LjPair> coeffs;
+  coeffs.reserve(system.pairs.size());
+  for (const PairSpec& spec : system.pairs) {
+    LjPair row;
+    row.type_i = spec.type_i;
+    row.type_j = spec.type_j;
+    row.epsilon = spec.epsilon;
+    row.sigma = spec.sigma;
+    row.cutoff = spec.cutoff;
+    coeffs.push_back(row);
+    max_cut = std::max(max_cut, spec.cutoff);
+  }
+  LjShift lj_shift = LjShift::None;
+  if (system.shift == Shift::Energy) lj_shift = LjShift::Energy;
+  if (system.shift == Shift::Force) lj_shift = LjShift::Force;
+  const ClusterGrid grid = BuildClusterGrid(system.box, hx.data(), hy.data(), hz.data(),
+                                            htype.data(), n, max_cut + system.skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  const TileDeviceForces raw =
+      RunTileForceGpu(grid, list, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift);
+  GpuForces out;
+  out.fx.resize(static_cast<size_t>(n));
+  out.fy.resize(static_cast<size_t>(n));
+  out.fz.resize(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    out.fx[static_cast<size_t>(i)] = static_cast<float>(raw.fx[static_cast<size_t>(i)]);
+    out.fy[static_cast<size_t>(i)] = static_cast<float>(raw.fy[static_cast<size_t>(i)]);
+    out.fz[static_cast<size_t>(i)] = static_cast<float>(raw.fz[static_cast<size_t>(i)]);
+  }
+  out.potential_energy = raw.potential_energy;
+  for (int k = 0; k < 6; ++k) out.virial[k] = raw.virial[k];
+  out.max_neigh = max_neigh;
+  if (n > 0) {
+    TILEMD_CHECK(cudaMemcpy(fx, out.fx.data(), sizeof(float) * n, cudaMemcpyHostToDevice));
+    TILEMD_CHECK(cudaMemcpy(fy, out.fy.data(), sizeof(float) * n, cudaMemcpyHostToDevice));
+    TILEMD_CHECK(cudaMemcpy(fz, out.fz.data(), sizeof(float) * n, cudaMemcpyHostToDevice));
+  }
+  forces_ready = true;
+  return out;
+}
+
+void Engine::Impl::RunClusterTiles(int steps) {
+  Upload();
+  TileForces();
+  const double inv_mass = 1.0 / system.mass;
+  for (int step = 0; step < steps; ++step) {
+    KickDrift<<<Grid(n), kBlock>>>(x, y, z, vx, vy, vz, fx, fy, fz, imgx, imgy, imgz, n, system.dt,
+                                   inv_mass);
+    CheckLaunch();
+    TileForces();
+    Kick<<<Grid(n), kBlock>>>(vx, vy, vz, fx, fy, fz, n, system.dt, inv_mass);
+    CheckLaunch();
+  }
+}
+
 void Engine::Impl::RecordInitialThermo() {
   if (thermo_origin_written || system.thermo_every <= 0) return;
   int one = 1;
@@ -1408,6 +1479,7 @@ GpuForces Engine::Impl::DownloadForces(int overflow) {
 
 GpuForces Engine::ComputeForces(bool grow) {
   impl_->Upload();
+  if (impl_->system.use_cluster_tiles) return impl_->TileForces();
   int overflow = impl_->BuildNeighbors(grow);
   if (!overflow) impl_->ComputeForce();
   return impl_->DownloadForces(overflow);
@@ -1415,6 +1487,10 @@ GpuForces Engine::ComputeForces(bool grow) {
 
 void Engine::Run(int steps) {
   if (steps < 0) throw std::runtime_error("step count must be non-negative");
+  if (impl_->system.use_cluster_tiles) {
+    impl_->RunClusterTiles(steps);
+    return;
+  }
   impl_->Upload();
   if (!impl_->forces_ready) {
     int overflow = impl_->BuildNeighbors(true);
