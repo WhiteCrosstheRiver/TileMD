@@ -804,6 +804,9 @@ struct Engine::Impl {
   void RebuildTileCache(float4* pos_cur);
   void PrepareTileRebuild(bool host_rebuilt);
   bool QueueTileRebuildStep(cudaStream_t stream, const float4* written);
+  void QueueFusedPhysics(cudaStream_t stream, float4* read, float4* write);
+  bool CaptureFusedConditional(cudaStream_t stream, int count, float4* cur, float4* nxt,
+                               cudaGraph_t* graph, cudaGraphExec_t* exec);
   void LaunchTileStep(float4* pos_cur, float4* pos_out);
   void RunTileSteps(int count, float4*& latest, float4*& other);
   bool CaptureFusedGraph(cudaStream_t stream, int count, float4* cur, float4* nxt,
@@ -1871,22 +1874,126 @@ void Engine::Impl::RunTileSteps(int count, float4*& latest, float4*& other) {
   }
 }
 
+void Engine::Impl::QueueFusedPhysics(cudaStream_t stream, float4* read, float4* write) {
+  PublishTileRecord<<<1, 1, 0, stream>>>(step_counter, system.thermo_every, tile_record);
+  LaunchFusedTileKernel(tile_ncluster, tile_type, tile_gid, tile_ci, tile_cj, tile_shift,
+                        tile_missing, x, y, z, vx, vy, vz, imgx, imgy, imgz, read, write, xref,
+                        status, step_counter, system.dt, 1.0 / system.mass, tile_partial, -1,
+                        stream, tile_record, tile_live, tile_cluster_cap);
+  FinishTileThermoDevice<<<1, 1, 0, stream>>>(tile_partial, tile_cluster_cap, thermo_ring,
+                                              kThermoRing, thermo_count, tile_record, tile_live,
+                                              status);
+  DecideRebuild<<<1, 1, 0, stream>>>(status);
+}
+
+bool Engine::Impl::CaptureFusedConditional(cudaStream_t stream, int count, float4* cur, float4* nxt,
+                                           cudaGraph_t* graph, cudaGraphExec_t* exec) {
+  if (count < 1) return false;
+  cudaGraph_t built = nullptr;
+  if (cudaGraphCreate(&built, 0) != cudaSuccess) return false;
+  std::vector<cudaGraphConditionalHandle> handles(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    if (cudaGraphConditionalHandleCreate(&handles[static_cast<size_t>(i)], built, 0,
+                                         cudaGraphCondAssignDefault) != cudaSuccess) {
+      cudaGraphDestroy(built);
+      return false;
+    }
+  }
+  if (cudaStreamBeginCaptureToGraph(stream, built, nullptr, nullptr, 0,
+                                    cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+    cudaGraphDestroy(built);
+    return false;
+  }
+  cudaStream_t body = nullptr;
+  if (cudaStreamCreate(&body) != cudaSuccess) {
+    cudaGraph_t junk = nullptr;
+    cudaStreamEndCapture(stream, &junk);
+    cudaGraphDestroy(built);
+    return false;
+  }
+  bool ok = cudaMemsetAsync(tile_missing, 0, sizeof(int), stream) == cudaSuccess;
+  float4* read = cur;
+  float4* write = nxt;
+  bool body_open = false;
+  for (int step = 0; step < count && ok; ++step) {
+    QueueFusedPhysics(stream, read, write);
+    PublishRebuild<<<1, 1, 0, stream>>>(handles[static_cast<size_t>(step)], status);
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    cudaGraph_t captured = nullptr;
+    const cudaGraphNode_t* deps = nullptr;
+    size_t ndeps = 0;
+    if (cudaStreamGetCaptureInfo(stream, &capture_status, nullptr, &captured, &deps, nullptr,
+                                 &ndeps) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    cudaGraphNodeParams params{};
+    params.type = cudaGraphNodeTypeConditional;
+    params.conditional.handle = handles[static_cast<size_t>(step)];
+    params.conditional.type = cudaGraphCondTypeIf;
+    params.conditional.size = 1;
+    cudaGraphNode_t cond = nullptr;
+    if (cudaGraphAddNode(&cond, captured, deps, nullptr, ndeps, &params) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    if (cudaStreamUpdateCaptureDependencies(stream, &cond, nullptr, 1,
+                                            cudaStreamSetCaptureDependencies) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    cudaGraph_t body_graph = params.conditional.phGraph_out[0];
+    if (cudaStreamBeginCaptureToGraph(body, body_graph, nullptr, nullptr, 0,
+                                      cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    body_open = true;
+    if (!QueueTileRebuildStep(body, write)) ok = false;
+    cudaGraph_t finished_body = nullptr;
+    if (cudaStreamEndCapture(body, &finished_body) != cudaSuccess) ok = false;
+    body_open = false;
+    std::swap(read, write);
+  }
+  if (body_open) {
+    cudaGraph_t junk_body = nullptr;
+    cudaStreamEndCapture(body, &junk_body);
+  }
+  cudaStreamDestroy(body);
+  cudaGraph_t ended = nullptr;
+  const cudaError_t end = cudaStreamEndCapture(stream, &ended);
+  if (!ok || end != cudaSuccess) {
+    if (ended && ended != built) cudaGraphDestroy(ended);
+    cudaGraphDestroy(built);
+    return false;
+  }
+  if (cudaGraphInstantiate(exec, built, 0) != cudaSuccess) {
+    cudaGraphDestroy(built);
+    return false;
+  }
+  *graph = built;
+  return true;
+}
+
 bool Engine::Impl::CaptureFusedGraph(cudaStream_t stream, int count, float4* cur, float4* nxt,
                                      cudaGraph_t* graph, cudaGraphExec_t* exec) {
+  cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+  cudaStreamIsCapturing(stream, &capture_status);
+  if (capture_status != cudaStreamCaptureStatusNone) {
+    cudaGraph_t junk = nullptr;
+    cudaStreamEndCapture(stream, &junk);
+    if (junk) cudaGraphDestroy(junk);
+  }
+  // The column sort cannot read the rebuild flag. A conditional node skips it.
+  // If that node cannot be captured, the flat graph keeps the early-exit kernels.
+  if (CaptureFusedConditional(stream, count, cur, nxt, graph, exec)) return true;
+  cudaGetLastError();
   if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) return false;
   bool ok = cudaMemsetAsync(tile_missing, 0, sizeof(int), stream) == cudaSuccess;
   float4* read = cur;
   float4* write = nxt;
   for (int step = 0; step < count && ok; ++step) {
-    PublishTileRecord<<<1, 1, 0, stream>>>(step_counter, system.thermo_every, tile_record);
-    LaunchFusedTileKernel(tile_ncluster, tile_type, tile_gid, tile_ci, tile_cj, tile_shift,
-                          tile_missing, x, y, z, vx, vy, vz, imgx, imgy, imgz, read, write, xref,
-                          status, step_counter, system.dt, 1.0 / system.mass, tile_partial, -1,
-                          stream, tile_record, tile_live, tile_cluster_cap);
-    FinishTileThermoDevice<<<1, 1, 0, stream>>>(tile_partial, tile_cluster_cap, thermo_ring,
-                                                kThermoRing, thermo_count, tile_record, tile_live,
-                                                status);
-    DecideRebuild<<<1, 1, 0, stream>>>(status);
+    QueueFusedPhysics(stream, read, write);
     if (!QueueTileRebuildStep(stream, write)) ok = false;
     std::swap(read, write);
   }
