@@ -532,3 +532,32 @@ TEST(Input, SetflRunMatchesLammpsCuNi) {
   std::filesystem::remove(xyz);
   std::filesystem::remove(dump);
 }
+
+TEST(Input, SetflDriftAgreesBeforeTheGasSeparates) {
+  const std::filesystem::path path = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                     "validation" / "lammps_ref" / "cuni_setfl_nve_drift.txt";
+  std::ifstream in(path);
+  ASSERT_TRUE(in.good());
+  std::string header;
+  std::getline(in, header);
+  int step = 0;
+  double time = 0.0;
+  double tilemd_energy = 0.0;
+  double lammps_energy = 0.0;
+  int count = 0;
+  int last_step = 0;
+  double early_gap = 0.0;
+  double max_gap = 0.0;
+  while (in >> step >> time >> tilemd_energy >> lammps_energy) {
+    ++count;
+    last_step = step;
+    const double gap = std::abs(tilemd_energy - lammps_energy);
+    max_gap = std::max(max_gap, gap);
+    if (step <= 3000) early_gap = std::max(early_gap, gap);
+  }
+  EXPECT_EQ(count, 1001);
+  EXPECT_EQ(last_step, 100000);
+  EXPECT_LT(early_gap, 1.0e-12);
+  std::cout << std::scientific << std::setprecision(8) << "setfl drift early gap " << early_gap
+            << " max gap " << max_gap << "\n";
+}

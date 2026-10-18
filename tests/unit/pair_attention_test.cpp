@@ -718,10 +718,10 @@ void CuNiStart(std::vector<double>& x, std::vector<double>& y, std::vector<doubl
 void RunCuNiNve(tilemd::EamSetfl& potential, double box[3], std::vector<double>& x,
                 std::vector<double>& y, std::vector<double>& z, std::vector<double>& vx,
                 std::vector<double>& vy, std::vector<double>& vz, const std::vector<int>& type,
-                bool tiles) {
+                int steps, bool tiles) {
   const int n = static_cast<int>(x.size());
   const double dt = 0.001;
-  for (int step = 0; step < 100; ++step) {
+  for (int step = 0; step < steps; ++step) {
     const tilemd::AttentionResult force =
         tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
                                                type.data(), n, 0.3)
@@ -755,10 +755,8 @@ void RunCuNiNve(tilemd::EamSetfl& potential, double box[3], std::vector<double>&
   }
 }
 
-TEST(PairAttention, SetflCuNiNveMatchesLammpsFor100Steps) {
+void ExpectCuNiNve(const std::filesystem::path& ref, double position_tolerance) {
   const std::string table = CuNiPotential();
-  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
-                                    "validation" / "lammps_ref" / "cuni_setfl_nve_100.txt";
   if (table.empty() || !std::filesystem::exists(ref)) {
     GTEST_SKIP() << "CuNi NVE reference has not been generated";
   }
@@ -770,7 +768,7 @@ TEST(PairAttention, SetflCuNiNveMatchesLammpsFor100Steps) {
   double energy = 0.0;
   in >> n >> box[0] >> box[1] >> box[2] >> dt_ref >> steps_ref >> energy;
   ASSERT_EQ(n, 4);
-  ASSERT_EQ(steps_ref, 100);
+  ASSERT_GT(steps_ref, 0);
   std::vector<double> rx(4);
   std::vector<double> ry(4);
   std::vector<double> rz(4);
@@ -793,7 +791,7 @@ TEST(PairAttention, SetflCuNiNveMatchesLammpsFor100Steps) {
     CuNiStart(x, y, z, vx, vy, vz, type);
     tilemd::EamSetfl potential(table);
     potential.SetAtoms(type.data(), n);
-    RunCuNiNve(potential, box, x, y, z, vx, vy, vz, type, tiles);
+    RunCuNiNve(potential, box, x, y, z, vx, vy, vz, type, steps_ref, tiles);
     const tilemd::AttentionResult final_force =
         tiles ? tilemd::EvaluateAttentionTiles(potential, box, x.data(), y.data(), z.data(),
                                                type.data(), n, 0.3)
@@ -817,11 +815,23 @@ TEST(PairAttention, SetflCuNiNveMatchesLammpsFor100Steps) {
       const double dvz = vz[static_cast<size_t>(i)] - rvz[static_cast<size_t>(i)];
       max_dv = std::max(max_dv, std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz));
     }
-    std::cout << std::scientific << std::setprecision(8) << "setfl nve 100 tiles " << tiles
-              << " max |dx| " << max_dx << " max |dv| " << max_dv << " energy "
+    std::cout << std::scientific << std::setprecision(8) << "setfl nve " << steps_ref << " tiles "
+              << tiles << " max |dx| " << max_dx << " max |dv| " << max_dv << " energy "
               << final_force.potential_energy << " lammps " << energy << "\n";
-    EXPECT_LT(max_dx, 1.0e-8);
-    EXPECT_LT(max_dv, 1.0e-8);
+    EXPECT_LT(max_dx, position_tolerance);
+    EXPECT_LT(max_dv, position_tolerance);
     EXPECT_NEAR(final_force.potential_energy, energy, 1.0e-6 * (1.0 + std::abs(energy)));
   }
+}
+
+TEST(PairAttention, SetflCuNiNveMatchesLammpsFor100Steps) {
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cuni_setfl_nve_100.txt";
+  ExpectCuNiNve(ref, 1.0e-8);
+}
+
+TEST(PairAttention, SetflCuNiNveMatchesLammpsFor1000Steps) {
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cuni_setfl_nve_1000.txt";
+  ExpectCuNiNve(ref, 1.0e-10);
 }
