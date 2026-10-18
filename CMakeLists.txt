@@ -82,7 +82,7 @@ add_library(tilemd_attention STATIC src/force/lj_attention.cu)
 target_link_libraries(tilemd_attention PUBLIC tilemd_headers tilemd_cluster)
 tilemd_apply_cuda_flags(tilemd_attention)
 
-add_library(tilemd_engine STATIC src/md/engine.cu src/md/tile_force.cu)
+add_library(tilemd_engine STATIC src/md/engine.cu src/md/tile_force.cu src/md/tile_rebuild.cu)
 target_link_libraries(tilemd_engine PUBLIC tilemd_headers tilemd_cluster)
 tilemd_apply_cuda_flags(tilemd_engine)
 

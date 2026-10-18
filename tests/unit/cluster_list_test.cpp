@@ -32,6 +32,21 @@ int ClusterOf(const tilemd::ClusterGrid& grid, int gid) {
 
 }  // namespace
 
+TEST(ClusterList, ColumnChoiceMatchesTheGrid) {
+  const double box[3] = {10.0, 20.0, 30.0};
+  std::vector<double> x(64, 1.0);
+  std::vector<double> y(64, 1.0);
+  std::vector<double> z(64, 1.0);
+  std::vector<int> type(64, 0);
+  const tilemd::ClusterShape shape = tilemd::ChooseClusterColumns(64, box);
+  const tilemd::ClusterGrid grid =
+      tilemd::BuildClusterGrid(box, x.data(), y.data(), z.data(), type.data(), 64, 2.5);
+  EXPECT_EQ(grid.ncolumn[0], shape.nx);
+  EXPECT_EQ(grid.ncolumn[1], shape.ny);
+  EXPECT_DOUBLE_EQ(grid.edge[0], shape.edge_x);
+  EXPECT_DOUBLE_EQ(grid.edge[1], shape.edge_y);
+}
+
 TEST(ClusterList, PadsAndSortsEachColumn) {
   const double box[3] = {10.0, 10.0, 10.0};
   const double x[3] = {1.0, 1.2, 1.1};

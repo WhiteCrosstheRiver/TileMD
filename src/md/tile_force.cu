@@ -115,6 +115,7 @@ struct TileIntegrate {
   TileThermoPartial* partial = nullptr;
   int record_step = -1;
   const int* record_ptr = nullptr;
+  const int* live_clusters = nullptr;
 };
 
 template <bool kIntegrate>
@@ -128,7 +129,8 @@ __global__ void __launch_bounds__(32)
   const int ci = blockIdx.x;
   const int i_local = lane % 8;
   const int j_sub = lane / 8;
-  if (ci >= ncluster) return;
+  const int live = integrate.live_clusters != nullptr ? *integrate.live_clusters : ncluster;
+  if (ci >= live) return;
 
   const int slot_i = ci * 8 + i_local;
   const int ti = type[slot_i];
@@ -621,11 +623,13 @@ void LaunchFusedTileKernel(int ncluster, const int* type, const int* gid, const 
                            int* imgx, int* imgy, int* imgz, float4* pos_cur, float4* pos_next,
                            float4* xref, void* status, int* step_counter, double dt,
                            double inv_mass, TileThermoPartial* partial, int record_step,
-                           cudaStream_t stream, const int* record_ptr) {
+                           cudaStream_t stream, const int* record_ptr, const int* live_clusters,
+                           int launch_blocks) {
   if (!(dt > 0.0) || !(inv_mass > 0.0)) {
     throw std::invalid_argument("dt and inverse mass must be positive");
   }
-  if (ncluster <= 0) return;
+  const int blocks = launch_blocks > 0 ? launch_blocks : ncluster;
+  if (blocks <= 0) return;
   TileIntegrate step;
   step.x = atom_x;
   step.y = atom_y;
@@ -646,7 +650,8 @@ void LaunchFusedTileKernel(int ncluster, const int* type, const int* gid, const 
   step.partial = partial;
   step.record_step = record_step;
   step.record_ptr = record_ptr;
-  TileForceKernel<true><<<ncluster, 32, 0, stream>>>(
+  step.live_clusters = live_clusters;
+  TileForceKernel<true><<<blocks, 32, 0, stream>>>(
       nullptr, nullptr, nullptr, type, gid, ci_start, cj, image, nullptr, nullptr, nullptr, nullptr,
       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, ncluster, missing, step);
   Check(cudaGetLastError());
@@ -663,7 +668,7 @@ void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const 
   Check(cudaMemset(missing, 0, sizeof(int)));
   LaunchFusedTileKernel(ncluster, type, gid, ci_start, cj, image, missing, atom_x, atom_y, atom_z,
                         vx, vy, vz, imgx, imgy, imgz, pos_cur, pos_next, xref, status, step_counter,
-                        dt, inv_mass, partial, record_step, nullptr, nullptr);
+                        dt, inv_mass, partial, record_step, nullptr, nullptr, nullptr, 0);
   Check(cudaDeviceSynchronize());
   int missing_host = 0;
   Check(cudaMemcpy(&missing_host, missing, sizeof(int), cudaMemcpyDeviceToHost));

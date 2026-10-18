@@ -18,6 +18,7 @@
 #include "core/device_status.hpp"
 #include "md/run_plan.hpp"
 #include "md/tile_force.hpp"
+#include "md/tile_rebuild.hpp"
 #include "md/tile_thermo.hpp"
 #include "neighbor/cluster_list.hpp"
 
@@ -509,11 +510,12 @@ __global__ void FinishTileThermo(const ThermoPartial* partial, int npartial, The
 
 __global__ void FinishTileThermoDevice(const ThermoPartial* partial, int npartial,
                                        ThermoRecord* ring, int capacity, int* thermo_count,
-                                       const int* record, DeviceStatus* status) {
+                                       const int* record, const int* live, DeviceStatus* status) {
   if (blockIdx.x != 0 || threadIdx.x != 0 || record == nullptr || *record < 0) return;
+  const int count = live != nullptr ? *live : npartial;
   ThermoRecord rec{};
   rec.step = *record;
-  for (int b = 0; b < npartial; ++b) {
+  for (int b = 0; b < count; ++b) {
     rec.ke += partial[b].ke;
     rec.pe += partial[b].pe;
     rec.wxx += partial[b].wxx;
@@ -740,9 +742,38 @@ struct Engine::Impl {
   TileThermoPartial* tile_partial = nullptr;
   int tile_partial_cap = 0;
   int tile_ncluster = 0;
+  int tile_npair = 0;
   int tile_slot_cap = 0;
   int tile_ci_cap = 0;
   int tile_pair_cap = 0;
+  int tile_cluster_cap = 0;
+  int tile_column_cap = 0;
+  int tile_nx = 0;
+  int tile_ny = 0;
+  double tile_edge[2] = {};
+  double tile_reach = 0.0;
+  int* tile_live = nullptr;
+  int* tile_column_count = nullptr;
+  int* tile_column_cluster = nullptr;
+  int* tile_column_ncluster = nullptr;
+  int* tile_cluster_column = nullptr;
+  unsigned long long* tile_zkey = nullptr;
+  unsigned long long* tile_zkey_out = nullptr;
+  int* tile_column_of = nullptr;
+  int* tile_colkey = nullptr;
+  int* tile_colkey_out = nullptr;
+  int* tile_order_in = nullptr;
+  int* tile_order_z = nullptr;
+  int* tile_order_out = nullptr;
+  double* tile_lo_x = nullptr;
+  double* tile_lo_y = nullptr;
+  double* tile_lo_z = nullptr;
+  double* tile_hi_x = nullptr;
+  double* tile_hi_y = nullptr;
+  double* tile_hi_z = nullptr;
+  int* tile_pair_count = nullptr;
+  void* tile_cub = nullptr;
+  size_t tile_cub_bytes = 0;
   std::vector<ThermoSample> drained;
 
   void Upload();
@@ -766,6 +797,8 @@ struct Engine::Impl {
   GpuForces TileForces();
   bool TileListStale();
   void RebuildTileCache(float4* pos_cur);
+  void PrepareTileRebuild(bool host_rebuilt);
+  bool QueueTileRebuildStep(cudaStream_t stream, const float4* written);
   void LaunchTileStep(float4* pos_cur, float4* pos_out);
   void RunTileSteps(int count, float4*& latest, float4*& other);
   bool CaptureFusedGraph(cudaStream_t stream, int count, float4* cur, float4* nxt,
@@ -796,6 +829,27 @@ struct Engine::Impl {
     cudaFree(tile_missing);
     cudaFree(tile_partial);
     cudaFree(tile_record);
+    cudaFree(tile_live);
+    cudaFree(tile_column_count);
+    cudaFree(tile_column_cluster);
+    cudaFree(tile_column_ncluster);
+    cudaFree(tile_cluster_column);
+    cudaFree(tile_zkey);
+    cudaFree(tile_zkey_out);
+    cudaFree(tile_column_of);
+    cudaFree(tile_colkey);
+    cudaFree(tile_colkey_out);
+    cudaFree(tile_order_in);
+    cudaFree(tile_order_z);
+    cudaFree(tile_order_out);
+    cudaFree(tile_lo_x);
+    cudaFree(tile_lo_y);
+    cudaFree(tile_lo_z);
+    cudaFree(tile_hi_x);
+    cudaFree(tile_hi_y);
+    cudaFree(tile_hi_z);
+    cudaFree(tile_pair_count);
+    cudaFree(tile_cub);
     cudaFree(fx);
     cudaFree(fy);
     cudaFree(fz);
@@ -1492,7 +1546,11 @@ void Engine::Impl::RebuildTileCache(float4* pos_cur) {
         cudaMemcpy(tile_shift, list.shift.data(), sizeof(int) * npair, cudaMemcpyHostToDevice));
   }
   tile_ncluster = grid.ncluster;
+  tile_npair = npair;
   tile_ready = true;
+  if (tile_live != nullptr) {
+    TILEMD_CHECK(cudaMemcpy(tile_live, &tile_ncluster, sizeof(int), cudaMemcpyHostToDevice));
+  }
   RefreshShadow<<<Grid(n), kBlock>>>(x, y, z, type, pos_cur, n);
   CheckLaunch();
   if (n > 0) {
@@ -1502,6 +1560,151 @@ void Engine::Impl::RebuildTileCache(float4* pos_cur) {
   TILEMD_CHECK(cudaMemcpy(&host, status, sizeof(host), cudaMemcpyDeviceToHost));
   host.max_disp2_bits = 0.f;
   TILEMD_CHECK(cudaMemcpy(status, &host, sizeof(host), cudaMemcpyHostToDevice));
+}
+
+int* GrowInt(int* old_ptr, int old_n, int new_n) {
+  int* fresh = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(new_n)));
+  if (old_ptr != nullptr && old_n > 0) {
+    const int ncopy = std::min(old_n, new_n);
+    TILEMD_CHECK(cudaMemcpy(fresh, old_ptr, sizeof(int) * static_cast<size_t>(ncopy),
+                            cudaMemcpyDeviceToDevice));
+  }
+  cudaFree(old_ptr);
+  return fresh;
+}
+
+void Engine::Impl::PrepareTileRebuild(bool host_rebuilt) {
+  if (n <= 0) return;
+  double max_cut = 0.0;
+  for (const PairSpec& spec : system.pairs) max_cut = std::max(max_cut, spec.cutoff);
+  const ClusterShape shape = ChooseClusterColumns(n, system.box);
+  tile_nx = shape.nx;
+  tile_ny = shape.ny;
+  tile_edge[0] = shape.edge_x;
+  tile_edge[1] = shape.edge_y;
+  tile_reach = max_cut + system.skin;
+  const int columns = shape.nx * shape.ny;
+  const int clusters = n;
+  const int slots = clusters * kClusterSize;
+  const int want_pairs = std::max(tile_pair_cap, tile_npair + tile_npair / 2 + 32);
+  if (slots > tile_slot_cap) {
+    tile_type = GrowInt(tile_type, tile_slot_cap, slots);
+    tile_gid = GrowInt(tile_gid, tile_slot_cap, slots);
+    tile_slot_cap = slots;
+  }
+  if (clusters + 1 > tile_ci_cap) {
+    tile_ci = GrowInt(tile_ci, tile_ci_cap, clusters + 1);
+    tile_ci_cap = clusters + 1;
+  }
+  if (want_pairs > tile_pair_cap) {
+    tile_cj = GrowInt(tile_cj, tile_pair_cap, want_pairs);
+    tile_shift = GrowInt(tile_shift, tile_pair_cap, want_pairs);
+    tile_pair_cap = want_pairs;
+  }
+  if (tile_column_cap < columns) {
+    cudaFree(tile_column_count);
+    cudaFree(tile_column_cluster);
+    cudaFree(tile_column_ncluster);
+    tile_column_count = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(columns)));
+    tile_column_cluster = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(columns)));
+    tile_column_ncluster =
+        static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(columns)));
+    tile_column_cap = columns;
+  }
+  if (tile_cluster_cap < clusters) {
+    cudaFree(tile_cluster_column);
+    cudaFree(tile_pair_count);
+    cudaFree(tile_lo_x);
+    cudaFree(tile_lo_y);
+    cudaFree(tile_lo_z);
+    cudaFree(tile_hi_x);
+    cudaFree(tile_hi_y);
+    cudaFree(tile_hi_z);
+    tile_cluster_column =
+        static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(clusters)));
+    tile_pair_count = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(clusters)));
+    tile_lo_x = static_cast<double*>(MustMalloc(sizeof(double) * static_cast<size_t>(clusters)));
+    tile_lo_y = static_cast<double*>(MustMalloc(sizeof(double) * static_cast<size_t>(clusters)));
+    tile_lo_z = static_cast<double*>(MustMalloc(sizeof(double) * static_cast<size_t>(clusters)));
+    tile_hi_x = static_cast<double*>(MustMalloc(sizeof(double) * static_cast<size_t>(clusters)));
+    tile_hi_y = static_cast<double*>(MustMalloc(sizeof(double) * static_cast<size_t>(clusters)));
+    tile_hi_z = static_cast<double*>(MustMalloc(sizeof(double) * static_cast<size_t>(clusters)));
+    tile_zkey = static_cast<unsigned long long*>(
+        MustMalloc(sizeof(unsigned long long) * static_cast<size_t>(n)));
+    tile_zkey_out = static_cast<unsigned long long*>(
+        MustMalloc(sizeof(unsigned long long) * static_cast<size_t>(n)));
+    tile_column_of = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(n)));
+    tile_colkey = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(n)));
+    tile_colkey_out = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(n)));
+    tile_order_in = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(n)));
+    tile_order_z = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(n)));
+    tile_order_out = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(n)));
+    size_t bytes_z = 0;
+    size_t bytes_c = 0;
+    TILEMD_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, bytes_z, tile_zkey, tile_zkey_out,
+                                                 tile_order_in, tile_order_z, n));
+    TILEMD_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, bytes_c, tile_colkey, tile_colkey_out,
+                                                 tile_order_z, tile_order_out, n));
+    cudaFree(tile_cub);
+    tile_cub_bytes = std::max(bytes_z, bytes_c);
+    tile_cub = MustMalloc(tile_cub_bytes);
+    tile_cluster_cap = clusters;
+  }
+  const bool created = tile_live == nullptr;
+  if (created) tile_live = static_cast<int*>(MustMalloc(sizeof(int)));
+  if (created || host_rebuilt) {
+    TILEMD_CHECK(cudaMemcpy(tile_live, &tile_ncluster, sizeof(int), cudaMemcpyHostToDevice));
+  }
+}
+
+bool Engine::Impl::QueueTileRebuildStep(cudaStream_t stream, const float4* written) {
+  DeviceTileRebuild in;
+  in.x = x;
+  in.y = y;
+  in.z = z;
+  in.type = type;
+  in.xref = xref;
+  in.pos = written;
+  in.status = status;
+  in.n = n;
+  in.nx = tile_nx;
+  in.ny = tile_ny;
+  in.edge_x = tile_edge[0];
+  in.edge_y = tile_edge[1];
+  in.reach = tile_reach;
+  in.box_x = system.box[0];
+  in.box_y = system.box[1];
+  in.box_z = system.box[2];
+  in.cluster_cap = tile_cluster_cap;
+  in.pair_cap = tile_pair_cap;
+  in.column_count = tile_column_count;
+  in.column_cluster = tile_column_cluster;
+  in.column_ncluster = tile_column_ncluster;
+  in.cluster_column = tile_cluster_column;
+  in.zkey = tile_zkey;
+  in.zkey_out = tile_zkey_out;
+  in.column_of = tile_column_of;
+  in.colkey = tile_colkey;
+  in.colkey_out = tile_colkey_out;
+  in.order_in = tile_order_in;
+  in.order_z = tile_order_z;
+  in.order_out = tile_order_out;
+  in.slot_type = tile_type;
+  in.slot_gid = tile_gid;
+  in.lo_x = tile_lo_x;
+  in.lo_y = tile_lo_y;
+  in.lo_z = tile_lo_z;
+  in.hi_x = tile_hi_x;
+  in.hi_y = tile_hi_y;
+  in.hi_z = tile_hi_z;
+  in.pair_count = tile_pair_count;
+  in.ci_start = tile_ci;
+  in.cj = tile_cj;
+  in.shift = tile_shift;
+  in.live = tile_live;
+  in.cub_temp = tile_cub;
+  in.cub_bytes = tile_cub_bytes;
+  return QueueDeviceTileRebuild(in, stream);
 }
 
 void Engine::Impl::LaunchTileStep(float4* pos_cur, float4* pos_out) {
@@ -1613,9 +1816,11 @@ bool Engine::Impl::CaptureFusedGraph(cudaStream_t stream, int count, float4* cur
     LaunchFusedTileKernel(tile_ncluster, tile_type, tile_gid, tile_ci, tile_cj, tile_shift,
                           tile_missing, x, y, z, vx, vy, vz, imgx, imgy, imgz, read, write, xref,
                           status, step_counter, system.dt, 1.0 / system.mass, tile_partial, -1,
-                          stream, tile_record);
-    FinishTileThermoDevice<<<1, 1, 0, stream>>>(tile_partial, tile_ncluster, thermo_ring,
-                                                kThermoRing, thermo_count, tile_record, status);
+                          stream, tile_record, tile_live, tile_cluster_cap);
+    FinishTileThermoDevice<<<1, 1, 0, stream>>>(tile_partial, tile_cluster_cap, thermo_ring,
+                                                kThermoRing, thermo_count, tile_record, tile_live,
+                                                status);
+    if (!QueueTileRebuildStep(stream, write)) ok = false;
     std::swap(read, write);
   }
   cudaGraph_t built = nullptr;
@@ -1657,15 +1862,17 @@ void Engine::Impl::RunClusterTiles(int steps) {
     while (done < steps) {
       int unroll = GraphUnroll(system.graph_unroll, steps - done);
       if (system.thermo_every > 0) unroll = std::min(unroll, kThermoRing);
-      if (TileListStale()) RebuildTileCache(latest);
+      const bool host_rebuilt = TileListStale();
+      if (host_rebuilt) RebuildTileCache(latest);
+      PrepareTileRebuild(host_rebuilt);
       if (tile_record == nullptr) {
         tile_record = static_cast<int*>(MustMalloc(sizeof(int)));
       }
-      if (system.thermo_every > 0 && tile_ncluster > tile_partial_cap) {
+      if (system.thermo_every > 0 && tile_cluster_cap > tile_partial_cap) {
         cudaFree(tile_partial);
         tile_partial = static_cast<TileThermoPartial*>(
-            MustMalloc(sizeof(TileThermoPartial) * static_cast<size_t>(tile_ncluster)));
-        tile_partial_cap = tile_ncluster;
+            MustMalloc(sizeof(TileThermoPartial) * static_cast<size_t>(tile_cluster_cap)));
+        tile_partial_cap = tile_cluster_cap;
       }
       const int saved_step = tile_step;
       GraphHold graph;
@@ -1692,6 +1899,10 @@ void Engine::Impl::RunClusterTiles(int steps) {
       if (!captured || tile_ncluster <= 0) {
         RunTileSteps(unroll, latest, other);
       } else {
+        DeviceStatus primed{};
+        TILEMD_CHECK(cudaMemcpy(&primed, status, sizeof(primed), cudaMemcpyDeviceToHost));
+        primed.overflow = 0;
+        TILEMD_CHECK(cudaMemcpy(status, &primed, sizeof(primed), cudaMemcpyHostToDevice));
         TILEMD_CHECK(cudaGraphLaunch(graph.exec, graph.stream));
         TILEMD_CHECK(cudaStreamSynchronize(graph.stream));
         TILEMD_CHECK(cudaGetLastError());
@@ -1706,8 +1917,8 @@ void Engine::Impl::RunClusterTiles(int steps) {
           throw std::runtime_error("non-finite force or position during integration at step " +
                                    std::to_string(done));
         }
-        if (!TileListStale()) DrainDeviceThermo();
-        if (TileListStale()) {
+        if (finished.overflow == 0 && !TileListStale()) DrainDeviceThermo();
+        if (finished.overflow != 0 || TileListStale()) {
           RestoreSnapshot();
           if (n > 0) {
             TILEMD_CHECK(cudaMemcpy(pos_next, pos, sizeof(float4) * n, cudaMemcpyDeviceToDevice));

@@ -49,6 +49,17 @@ struct ClusterPairs {
 
 int ShiftIndex(int sx, int sy, int sz);
 
+// Column counts and edges used by `BuildClusterGrid`. `nx` and `ny` of 0 choose
+// the default, about 32 atoms per column.
+struct ClusterShape {
+  int nx = 1;
+  int ny = 1;
+  double edge_x = 0.0;
+  double edge_y = 0.0;
+};
+
+ClusterShape ChooseClusterColumns(int n, const double* box, int nx = 0, int ny = 0);
+
 ClusterGrid BuildClusterGrid(const double* box, const double* x, const double* y, const double* z,
                              const int* type, int n, double reach, int nx = 0, int ny = 0);
 

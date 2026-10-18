@@ -17,6 +17,8 @@
 #include "force/lj_attention.hpp"
 #include "lj_reference.hpp"
 #include "md/engine.hpp"
+#include "md/tile_rebuild.hpp"
+#include "neighbor/cluster_list.hpp"
 
 namespace {
 
@@ -507,4 +509,37 @@ TEST(GpuLj, AttentionKernelMatchesOracle) {
                 1.0e-10 * (1.0 + std::abs(expected.potential_energy)))
         << name;
   }
+}
+
+TEST(GpuLj, DeviceClusterRebuildMatchesTheHostList) {
+  if (!HasGpu()) GTEST_SKIP();
+  const double box[3] = {8.0, 8.0, 8.0};
+  const int n = 64;
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  std::vector<int> type(static_cast<size_t>(n), 0);
+  int atom = 0;
+  for (int iz = 0; iz < 4; ++iz) {
+    for (int iy = 0; iy < 4; ++iy) {
+      for (int ix = 0; ix < 4; ++ix) {
+        x[static_cast<size_t>(atom)] = 0.5 + 2.0 * ix;
+        y[static_cast<size_t>(atom)] = 0.5 + 2.0 * iy;
+        z[static_cast<size_t>(atom)] = 0.5 + 2.0 * iz;
+        ++atom;
+      }
+    }
+  }
+  const double reach = 3.0;
+  const tilemd::ClusterGrid host_grid =
+      tilemd::BuildClusterGrid(box, x.data(), y.data(), z.data(), type.data(), n, reach);
+  const tilemd::ClusterPairs host_pairs = tilemd::BuildClusterPairs(host_grid);
+  const tilemd::HostClusterList device =
+      tilemd::RebuildClusterListOnDevice(box, x.data(), y.data(), z.data(), type.data(), n, reach);
+  EXPECT_EQ(device.ncluster, host_grid.ncluster);
+  EXPECT_EQ(device.type, host_grid.type);
+  EXPECT_EQ(device.gid, host_grid.gid);
+  EXPECT_EQ(device.ci_start, host_pairs.ci_start);
+  EXPECT_EQ(device.cj, host_pairs.cj);
+  EXPECT_EQ(device.shift, host_pairs.shift);
 }

@@ -30,19 +30,25 @@ int ColumnIndex(double x, double edge, int ncolumn) {
   return i;
 }
 
-void ChooseColumns(int n, const double* box, int requested_nx, int requested_ny, int* nx, int* ny) {
-  if (requested_nx > 0 && requested_ny > 0) {
-    *nx = requested_nx;
-    *ny = requested_ny;
-    return;
+}  // namespace
+
+ClusterShape ChooseClusterColumns(int n, const double* box, int nx, int ny) {
+  ClusterShape shape;
+  if (nx > 0 && ny > 0) {
+    shape.nx = nx;
+    shape.ny = ny;
+  } else {
+    const double columns = std::max(1.0, static_cast<double>(n) / 32.0);
+    const double aspect = box[0] / box[1];
+    shape.nx = std::max(1, static_cast<int>(std::lround(std::sqrt(columns * aspect))));
+    shape.ny = std::max(1, static_cast<int>(std::lround(columns / static_cast<double>(shape.nx))));
   }
-  const double columns = std::max(1.0, static_cast<double>(n) / 32.0);
-  const double aspect = box[0] / box[1];
-  int x = std::max(1, static_cast<int>(std::lround(std::sqrt(columns * aspect))));
-  int y = std::max(1, static_cast<int>(std::lround(columns / static_cast<double>(x))));
-  *nx = x;
-  *ny = y;
+  shape.edge_x = box[0] / static_cast<double>(shape.nx);
+  shape.edge_y = box[1] / static_cast<double>(shape.ny);
+  return shape;
 }
+
+namespace {
 
 double AxisGap(double a_lo, double a_hi, double b_lo, double b_hi) {
   if (a_hi < b_lo) return b_lo - a_hi;
@@ -71,9 +77,11 @@ ClusterGrid BuildClusterGrid(const double* box, const double* x, const double* y
   grid.box[2] = box[2];
   grid.reach = reach;
   grid.n_real = n;
-  ChooseColumns(n, box, nx, ny, &grid.ncolumn[0], &grid.ncolumn[1]);
-  grid.edge[0] = box[0] / static_cast<double>(grid.ncolumn[0]);
-  grid.edge[1] = box[1] / static_cast<double>(grid.ncolumn[1]);
+  const ClusterShape shape = ChooseClusterColumns(n, box, nx, ny);
+  grid.ncolumn[0] = shape.nx;
+  grid.ncolumn[1] = shape.ny;
+  grid.edge[0] = shape.edge_x;
+  grid.edge[1] = shape.edge_y;
 
   const int ncolumn = grid.ncolumn[0] * grid.ncolumn[1];
   std::vector<std::vector<Slot>> columns(static_cast<size_t>(ncolumn));

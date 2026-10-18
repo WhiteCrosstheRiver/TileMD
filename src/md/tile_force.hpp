@@ -58,7 +58,7 @@ void LaunchFusedTileKernel(int ncluster, const int* type, const int* gid, const 
                            int* imgz, float4* pos_cur, float4* pos_next, float4* xref, void* status,
                            int* step_counter, double dt, double inv_mass,
                            TileThermoPartial* partial, int record_step, cudaStream_t stream,
-                           const int* record_ptr);
+                           const int* record_ptr, const int* live_clusters, int launch_blocks);
 
 void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const int* ci_start,
                            const int* cj, const int* image, int* missing, const double* box,
