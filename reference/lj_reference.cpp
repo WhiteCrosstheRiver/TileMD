@@ -444,4 +444,144 @@ LammpsDump ReadLammpsDump(const std::string& path, Shift shift,
   return dump;
 }
 
+namespace {
+
+double WrapCoordinate(double value, double length, int* image) {
+  double periods = std::floor(value / length);
+  int shift = static_cast<int>(periods);
+  value -= periods * length;
+  if (value >= length) {
+    value -= length;
+    ++shift;
+  } else if (value < 0.0) {
+    value += length;
+    --shift;
+  }
+  *image += shift;
+  return value;
+}
+
+Observables ForcesAt(System& system, const Dynamics& state) {
+  system.x = state.x;
+  system.y = state.y;
+  system.z = state.z;
+  return Compute(system);
+}
+
+void CheckDynamics(const System& system, const Dynamics& state, double dt, double mass) {
+  if (!(mass > 0.0)) throw std::runtime_error("mass must be positive");
+  if (!(dt > 0.0)) throw std::runtime_error("dt must be positive");
+  const int n = NumAtoms(system);
+  const bool sized =
+      static_cast<int>(state.x.size()) == n && static_cast<int>(state.y.size()) == n &&
+      static_cast<int>(state.z.size()) == n && static_cast<int>(state.vx.size()) == n &&
+      static_cast<int>(state.vy.size()) == n && static_cast<int>(state.vz.size()) == n &&
+      static_cast<int>(state.imgx.size()) == n && static_cast<int>(state.imgy.size()) == n &&
+      static_cast<int>(state.imgz.size()) == n;
+  if (!sized) throw std::runtime_error("dynamics size does not match the system");
+}
+
+}  // namespace
+
+Dynamics MakeDynamics(const System& system, const std::vector<double>& vx,
+                      const std::vector<double>& vy, const std::vector<double>& vz) {
+  const int n = NumAtoms(system);
+  if (static_cast<int>(vx.size()) != n || static_cast<int>(vy.size()) != n ||
+      static_cast<int>(vz.size()) != n) {
+    throw std::runtime_error("velocity size does not match the system");
+  }
+  Dynamics state;
+  state.x = system.x;
+  state.y = system.y;
+  state.z = system.z;
+  state.vx = vx;
+  state.vy = vy;
+  state.vz = vz;
+  state.imgx.assign(static_cast<size_t>(n), 0);
+  state.imgy.assign(static_cast<size_t>(n), 0);
+  state.imgz.assign(static_cast<size_t>(n), 0);
+  return state;
+}
+
+void VelocityVerletStep(System& system, Dynamics& state, double dt, double mass) {
+  CheckDynamics(system, state, dt, mass);
+  const Observables first = ForcesAt(system, state);
+  const double half = 0.5 * dt / mass;
+  const int n = NumAtoms(system);
+  for (int i = 0; i < n; ++i) {
+    state.vx[static_cast<size_t>(i)] += half * first.fx[static_cast<size_t>(i)];
+    state.vy[static_cast<size_t>(i)] += half * first.fy[static_cast<size_t>(i)];
+    state.vz[static_cast<size_t>(i)] += half * first.fz[static_cast<size_t>(i)];
+    state.x[static_cast<size_t>(i)] =
+        WrapCoordinate(state.x[static_cast<size_t>(i)] + dt * state.vx[static_cast<size_t>(i)],
+                       system.box[0], &state.imgx[static_cast<size_t>(i)]);
+    state.y[static_cast<size_t>(i)] =
+        WrapCoordinate(state.y[static_cast<size_t>(i)] + dt * state.vy[static_cast<size_t>(i)],
+                       system.box[1], &state.imgy[static_cast<size_t>(i)]);
+    state.z[static_cast<size_t>(i)] =
+        WrapCoordinate(state.z[static_cast<size_t>(i)] + dt * state.vz[static_cast<size_t>(i)],
+                       system.box[2], &state.imgz[static_cast<size_t>(i)]);
+  }
+  const Observables second = ForcesAt(system, state);
+  for (int i = 0; i < n; ++i) {
+    state.vx[static_cast<size_t>(i)] += half * second.fx[static_cast<size_t>(i)];
+    state.vy[static_cast<size_t>(i)] += half * second.fy[static_cast<size_t>(i)];
+    state.vz[static_cast<size_t>(i)] += half * second.fz[static_cast<size_t>(i)];
+  }
+}
+
+void PrepareLeapfrog(System& system, Dynamics& state, double dt, double mass) {
+  CheckDynamics(system, state, dt, mass);
+  const Observables force = ForcesAt(system, state);
+  const double half = 0.5 * dt / mass;
+  const int n = NumAtoms(system);
+  for (int i = 0; i < n; ++i) {
+    state.vx[static_cast<size_t>(i)] -= half * force.fx[static_cast<size_t>(i)];
+    state.vy[static_cast<size_t>(i)] -= half * force.fy[static_cast<size_t>(i)];
+    state.vz[static_cast<size_t>(i)] -= half * force.fz[static_cast<size_t>(i)];
+  }
+}
+
+void LeapfrogStep(System& system, Dynamics& state, double dt, double mass) {
+  CheckDynamics(system, state, dt, mass);
+  const Observables force = ForcesAt(system, state);
+  const double scale = dt / mass;
+  const int n = NumAtoms(system);
+  for (int i = 0; i < n; ++i) {
+    state.vx[static_cast<size_t>(i)] += scale * force.fx[static_cast<size_t>(i)];
+    state.vy[static_cast<size_t>(i)] += scale * force.fy[static_cast<size_t>(i)];
+    state.vz[static_cast<size_t>(i)] += scale * force.fz[static_cast<size_t>(i)];
+    state.x[static_cast<size_t>(i)] =
+        WrapCoordinate(state.x[static_cast<size_t>(i)] + dt * state.vx[static_cast<size_t>(i)],
+                       system.box[0], &state.imgx[static_cast<size_t>(i)]);
+    state.y[static_cast<size_t>(i)] =
+        WrapCoordinate(state.y[static_cast<size_t>(i)] + dt * state.vy[static_cast<size_t>(i)],
+                       system.box[1], &state.imgy[static_cast<size_t>(i)]);
+    state.z[static_cast<size_t>(i)] =
+        WrapCoordinate(state.z[static_cast<size_t>(i)] + dt * state.vz[static_cast<size_t>(i)],
+                       system.box[2], &state.imgz[static_cast<size_t>(i)]);
+  }
+}
+
+void IntegerTimeVelocity(const System& system, const Dynamics& half_step, double dt, double mass,
+                         std::vector<double>& vx, std::vector<double>& vy,
+                         std::vector<double>& vz) {
+  CheckDynamics(system, half_step, dt, mass);
+  System copy = system;
+  const Observables force = ForcesAt(copy, half_step);
+  const double half = 0.5 * dt / mass;
+  const int n = NumAtoms(system);
+  vx.resize(static_cast<size_t>(n));
+  vy.resize(static_cast<size_t>(n));
+  vz.resize(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] =
+        half_step.vx[static_cast<size_t>(i)] + half * force.fx[static_cast<size_t>(i)];
+    vy[static_cast<size_t>(i)] =
+        half_step.vy[static_cast<size_t>(i)] + half * force.fy[static_cast<size_t>(i)];
+    vz[static_cast<size_t>(i)] =
+        half_step.vz[static_cast<size_t>(i)] + half * force.fz[static_cast<size_t>(i)];
+  }
+}
+
 }  // namespace tilemd::ref

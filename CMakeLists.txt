@@ -95,7 +95,7 @@ if(TILEMD_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp tests/unit/lj_reference_test.cpp
-                                 tests/unit/cluster_list_test.cpp)
+                                 tests/unit/cluster_list_test.cpp tests/unit/integrator_test.cpp)
   target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_reference
                                                  tilemd_cluster)
   file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" TILEMD_SOURCE_DIR_FWD)

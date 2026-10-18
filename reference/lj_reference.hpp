@@ -62,4 +62,32 @@ LammpsDump ReadLammpsDump(const std::string& path, Shift shift,
 
 double MinImage(double delta, double length);
 
+// Moving state for the Stage-1 integrators. Positions stay wrapped in [0, L).
+// Image counters hold the periods removed by wrapping. Leapfrog stores
+// v(t − dt/2); velocity Verlet stores v(t).
+struct Dynamics {
+  std::vector<double> x;
+  std::vector<double> y;
+  std::vector<double> z;
+  std::vector<double> vx;
+  std::vector<double> vy;
+  std::vector<double> vz;
+  std::vector<int> imgx;
+  std::vector<int> imgy;
+  std::vector<int> imgz;
+};
+
+Dynamics MakeDynamics(const System& system, const std::vector<double>& vx,
+                      const std::vector<double>& vy, const std::vector<double>& vz);
+
+void VelocityVerletStep(System& system, Dynamics& state, double dt, double mass);
+
+// Rewrites velocities as v(−dt/2) = v(0) − ½ dt f(0) / m.
+void PrepareLeapfrog(System& system, Dynamics& state, double dt, double mass);
+void LeapfrogStep(System& system, Dynamics& state, double dt, double mass);
+
+// v(t) = v(t − dt/2) + ½ dt f(t) / m, using the positions stored in `half_step`.
+void IntegerTimeVelocity(const System& system, const Dynamics& half_step, double dt, double mass,
+                         std::vector<double>& vx, std::vector<double>& vy, std::vector<double>& vz);
+
 }  // namespace tilemd::ref

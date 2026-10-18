@@ -16,7 +16,7 @@
 | M3 GPU v0 (correct, simple) | `m3-gpu-v0` | in progress | G1 | | Local T1, T2, T3, T6, T7, and T8 passed on an RTX 3050 against CPU LAMMPS. T4 and T5 are not run. No KOKKOS package and no GitHub PR (`gh` is not installed). |
 | M4 Performance foundation | `m4-perf-foundation` | in progress | G2, G3 | | Spatial sort, device rebuild, a 50-step graph, conditional rebuild, device thermo, and launch-bounds/`__ldg` are in. The block-size sweep and GPU tests wait until this GPU is free. |
 | M5 Cluster-pair tiles (SIMT) | `m5-cluster-tiles` | in progress | G2+ | | CPU list and tile force match the oracle. The GPU warp tile kernel is selectable and has not been launched here. Tile efficiency is 0.0229 at 4k and 0.0085 at 32k, below the 40–60% expectation. |
-| M6 Fused single-kernel timestep | `m6-fused-step` | not started | G2+, G3+ | | |
+| M6 Fused single-kernel timestep | `m6-fused-step` | in progress | G2+, G3+ | | CPU leapfrog matches velocity Verlet to round-off over 100 steps. The fused GPU kernel is not in yet. |
 | M7 Tensor-core pair-attention tile | `m7-tensor-core` | not started | G4 | | |
 | M8 Generic pair-attention API + EAM | `m8-pair-attention-api` | not started | G5 | | |
 
