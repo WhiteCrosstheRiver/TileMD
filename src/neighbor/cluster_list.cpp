@@ -171,72 +171,72 @@ ClusterPairs BuildClusterPairs(const ClusterGrid& grid) {
   const int radius_x = std::min(nx, static_cast<int>(std::ceil(grid.reach / grid.edge[0])));
   const int radius_y = std::min(ny, static_cast<int>(std::ceil(grid.reach / grid.edge[1])));
   const double reach2 = grid.reach * grid.reach;
-  for (int ix = 0; ix < nx; ++ix) {
-    for (int iy = 0; iy < ny; ++iy) {
-      const int icolumn = ix + nx * iy;
-      const int i_begin = grid.column_cluster[static_cast<size_t>(icolumn)];
-      const int i_count = grid.column_ncluster[static_cast<size_t>(icolumn)];
-      for (int local_i = 0; local_i < i_count; ++local_i) {
-        const int ci = i_begin + local_i;
-        if (EmptyBox(grid, ci)) {
-          pairs.ci_start[static_cast<size_t>(ci) + 1] = static_cast<int>(pairs.cj.size());
-          continue;
-        }
-        for (int dy = -radius_y; dy <= radius_y; ++dy) {
-          for (int dx = -radius_x; dx <= radius_x; ++dx) {
-            int jx = ix + dx;
-            int sx = 0;
-            if (jx >= nx) {
-              jx -= nx;
-              sx = 1;
-            } else if (jx < 0) {
-              jx += nx;
-              sx = -1;
-            }
-            int jy = iy + dy;
-            int sy = 0;
-            if (jy >= ny) {
-              jy -= ny;
-              sy = 1;
-            } else if (jy < 0) {
-              jy += ny;
-              sy = -1;
-            }
-            const int jcolumn = jx + nx * jy;
-            const int j_begin = grid.column_cluster[static_cast<size_t>(jcolumn)];
-            const int j_count = grid.column_ncluster[static_cast<size_t>(jcolumn)];
-            for (int local_j = 0; local_j < j_count; ++local_j) {
-              const int cj = j_begin + local_j;
-              ++pairs.examined;
-              if (EmptyBox(grid, cj)) continue;
-              for (int sz = -1; sz <= 1; ++sz) {
-                const double j_lo_z = grid.lo_z[static_cast<size_t>(cj)] + sz * grid.box[2];
-                const double j_hi_z = grid.hi_z[static_cast<size_t>(cj)] + sz * grid.box[2];
-                if (grid.hi_z[static_cast<size_t>(ci)] + grid.reach < j_lo_z) continue;
-                if (j_hi_z + grid.reach < grid.lo_z[static_cast<size_t>(ci)]) continue;
-                const double gap_x =
-                    AxisGap(grid.lo_x[static_cast<size_t>(ci)], grid.hi_x[static_cast<size_t>(ci)],
-                            grid.lo_x[static_cast<size_t>(cj)] + sx * grid.box[0],
-                            grid.hi_x[static_cast<size_t>(cj)] + sx * grid.box[0]);
-                const double gap_y =
-                    AxisGap(grid.lo_y[static_cast<size_t>(ci)], grid.hi_y[static_cast<size_t>(ci)],
-                            grid.lo_y[static_cast<size_t>(cj)] + sy * grid.box[1],
-                            grid.hi_y[static_cast<size_t>(cj)] + sy * grid.box[1]);
-                const double gap_z = AxisGap(grid.lo_z[static_cast<size_t>(ci)],
-                                             grid.hi_z[static_cast<size_t>(ci)], j_lo_z, j_hi_z);
-                if (gap_x * gap_x + gap_y * gap_y + gap_z * gap_z < reach2) {
-                  pairs.cj.push_back(cj);
-                  pairs.shift.push_back(ShiftIndex(sx, sy, sz));
-                  ++pairs.kept;
-                }
+  // Column index is ix + nx * iy, and clusters were numbered in that same
+  // linear order. The pair rows have to be appended in cluster order so each
+  // CSR range stays contiguous.
+  for (int icolumn = 0; icolumn < nx * ny; ++icolumn) {
+    const int ix = icolumn % nx;
+    const int iy = icolumn / nx;
+    const int i_begin = grid.column_cluster[static_cast<size_t>(icolumn)];
+    const int i_count = grid.column_ncluster[static_cast<size_t>(icolumn)];
+    for (int local_i = 0; local_i < i_count; ++local_i) {
+      const int ci = i_begin + local_i;
+      pairs.ci_start[static_cast<size_t>(ci)] = static_cast<int>(pairs.cj.size());
+      if (EmptyBox(grid, ci)) continue;
+      for (int dy = -radius_y; dy <= radius_y; ++dy) {
+        for (int dx = -radius_x; dx <= radius_x; ++dx) {
+          int jx = ix + dx;
+          int sx = 0;
+          if (jx >= nx) {
+            jx -= nx;
+            sx = 1;
+          } else if (jx < 0) {
+            jx += nx;
+            sx = -1;
+          }
+          int jy = iy + dy;
+          int sy = 0;
+          if (jy >= ny) {
+            jy -= ny;
+            sy = 1;
+          } else if (jy < 0) {
+            jy += ny;
+            sy = -1;
+          }
+          const int jcolumn = jx + nx * jy;
+          const int j_begin = grid.column_cluster[static_cast<size_t>(jcolumn)];
+          const int j_count = grid.column_ncluster[static_cast<size_t>(jcolumn)];
+          for (int local_j = 0; local_j < j_count; ++local_j) {
+            const int cj = j_begin + local_j;
+            ++pairs.examined;
+            if (EmptyBox(grid, cj)) continue;
+            for (int sz = -1; sz <= 1; ++sz) {
+              const double j_lo_z = grid.lo_z[static_cast<size_t>(cj)] + sz * grid.box[2];
+              const double j_hi_z = grid.hi_z[static_cast<size_t>(cj)] + sz * grid.box[2];
+              if (grid.hi_z[static_cast<size_t>(ci)] + grid.reach < j_lo_z) continue;
+              if (j_hi_z + grid.reach < grid.lo_z[static_cast<size_t>(ci)]) continue;
+              const double gap_x =
+                  AxisGap(grid.lo_x[static_cast<size_t>(ci)], grid.hi_x[static_cast<size_t>(ci)],
+                          grid.lo_x[static_cast<size_t>(cj)] + sx * grid.box[0],
+                          grid.hi_x[static_cast<size_t>(cj)] + sx * grid.box[0]);
+              const double gap_y =
+                  AxisGap(grid.lo_y[static_cast<size_t>(ci)], grid.hi_y[static_cast<size_t>(ci)],
+                          grid.lo_y[static_cast<size_t>(cj)] + sy * grid.box[1],
+                          grid.hi_y[static_cast<size_t>(cj)] + sy * grid.box[1]);
+              const double gap_z = AxisGap(grid.lo_z[static_cast<size_t>(ci)],
+                                           grid.hi_z[static_cast<size_t>(ci)], j_lo_z, j_hi_z);
+              if (gap_x * gap_x + gap_y * gap_y + gap_z * gap_z < reach2) {
+                pairs.cj.push_back(cj);
+                pairs.shift.push_back(ShiftIndex(sx, sy, sz));
+                ++pairs.kept;
               }
             }
           }
         }
-        pairs.ci_start[static_cast<size_t>(ci) + 1] = static_cast<int>(pairs.cj.size());
       }
     }
   }
+  pairs.ci_start[static_cast<size_t>(grid.ncluster)] = static_cast<int>(pairs.cj.size());
   return pairs;
 }
 

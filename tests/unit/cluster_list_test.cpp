@@ -153,8 +153,8 @@ TEST(ClusterList, ReportsTileEfficiency) {
   const tilemd::ref::System melt =
       tilemd::ref::ReadExtxyz(std::string(TILEMD_SOURCE_DIR) + "/tests/fixtures/melt_4000.extxyz");
   const double melt_ratio = efficiency(melt.x, melt.y, melt.z, melt.box);
-  EXPECT_GT(melt_ratio, 0.015);
-  EXPECT_LT(melt_ratio, 0.04);
+  EXPECT_GT(melt_ratio, 0.08);
+  EXPECT_LT(melt_ratio, 0.13);
 
   std::ifstream dump(std::string(TILEMD_SOURCE_DIR) + "/tests/validation/lammps_ref/init_32k.dump");
   ASSERT_TRUE(dump) << "32k initial dump";
@@ -192,6 +192,69 @@ TEST(ClusterList, ReportsTileEfficiency) {
   }
   ASSERT_TRUE(dump);
   const double melt32_ratio = efficiency(x, y, z, box);
-  EXPECT_GT(melt32_ratio, 0.005);
-  EXPECT_LT(melt32_ratio, 0.02);
+  EXPECT_GT(melt32_ratio, 0.07);
+  EXPECT_LT(melt32_ratio, 0.12);
+}
+
+TEST(ClusterList, TileForcesMatchTheOracleOnFixtures) {
+  const char* names[] = {"fcc_500", "boundary_500", "cutoff_500", "twotype_2000", "melt_4000"};
+  const std::string dir = std::string(TILEMD_SOURCE_DIR) + "/tests/fixtures/";
+  for (const char* name : names) {
+    tilemd::ref::System system = tilemd::ref::ReadExtxyz(dir + name + ".extxyz");
+    tilemd::ref::ReadSystemHeader(dir + name + ".json", system);
+    const int n = tilemd::ref::NumAtoms(system);
+    std::vector<tilemd::LjPair> pairs;
+    for (const tilemd::ref::PairCoeff& coeff : system.pairs) {
+      tilemd::LjPair pair;
+      pair.type_i = coeff.type_i;
+      pair.type_j = coeff.type_j;
+      pair.epsilon = coeff.epsilon;
+      pair.sigma = coeff.sigma;
+      pair.cutoff = coeff.cutoff;
+      pairs.push_back(pair);
+    }
+    tilemd::LjShift shift = tilemd::LjShift::None;
+    if (system.shift == tilemd::ref::Shift::Energy) shift = tilemd::LjShift::Energy;
+    if (system.shift == tilemd::ref::Shift::Force) shift = tilemd::LjShift::Force;
+    const tilemd::ref::Observables oracle = tilemd::ref::Compute(system);
+    const tilemd::TileForces got = tilemd::ComputeTileForces(
+        system.box, system.x.data(), system.y.data(), system.z.data(), system.type.data(), n,
+        pairs.data(), static_cast<int>(pairs.size()), 0.3, shift);
+    double max_delta = 0.0;
+    double sum_sq = 0.0;
+    for (int i = 0; i < n; ++i) {
+      const double ex = got.fx[static_cast<size_t>(i)] - oracle.fx[static_cast<size_t>(i)];
+      const double ey = got.fy[static_cast<size_t>(i)] - oracle.fy[static_cast<size_t>(i)];
+      const double ez = got.fz[static_cast<size_t>(i)] - oracle.fz[static_cast<size_t>(i)];
+      max_delta = std::max(max_delta, std::sqrt(ex * ex + ey * ey + ez * ez));
+      sum_sq += oracle.fx[static_cast<size_t>(i)] * oracle.fx[static_cast<size_t>(i)] +
+                oracle.fy[static_cast<size_t>(i)] * oracle.fy[static_cast<size_t>(i)] +
+                oracle.fz[static_cast<size_t>(i)] * oracle.fz[static_cast<size_t>(i)];
+    }
+    const double rms = std::sqrt(sum_sq / static_cast<double>(n));
+    double virial_delta = 0.0;
+    for (int k = 0; k < 6; ++k) {
+      virial_delta = std::max(virial_delta, std::abs(got.virial[k] - oracle.virial[k]));
+    }
+    std::cout << name << " pairs_inside " << got.pairs_inside << " force_max " << max_delta
+              << " rms " << rms << " energy_delta "
+              << std::abs(got.potential_energy - oracle.potential_energy) << " virial_delta "
+              << virial_delta << "\n";
+    if (rms < 1.0e-8) {
+      EXPECT_LT(max_delta, 1.0e-8) << name;
+    } else {
+      EXPECT_LT(max_delta / rms, 1.0e-10) << name;
+    }
+    EXPECT_NEAR(got.potential_energy, oracle.potential_energy,
+                1.0e-8 * std::max(1.0, std::abs(oracle.potential_energy)))
+        << name;
+    double virial_scale = 1.0;
+    for (int k = 0; k < 6; ++k) {
+      virial_scale = std::max(virial_scale, std::abs(oracle.virial[k]));
+    }
+    for (int k = 0; k < 6; ++k) {
+      EXPECT_NEAR(got.virial[k], oracle.virial[k], 1.0e-8 * virial_scale)
+          << name << " virial " << k;
+    }
+  }
 }
