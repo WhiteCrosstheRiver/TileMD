@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -442,6 +443,40 @@ TEST(Input, EamRunMatchesLammpsCopper) {
   EXPECT_LT(max_dv, 1.0e-8);
   EXPECT_NEAR(rows[1].potential_per_atom * static_cast<double>(n), energy,
               1.0e-6 * (1.0 + std::abs(energy)));
+  const std::filesystem::path thermo_ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                           "validation" / "lammps_ref" / "cu_u3_nve_thermo.txt";
+  std::ifstream thermo(thermo_ref);
+  ASSERT_TRUE(static_cast<bool>(thermo));
+  std::string line;
+  while (std::getline(thermo, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::istringstream row(line);
+    int step = -1;
+    double temp = 0.0;
+    double pe = 0.0;
+    double ke = 0.0;
+    double etotal = 0.0;
+    double press = 0.0;
+    row >> step >> temp >> pe >> ke >> etotal >> press;
+    ASSERT_TRUE(static_cast<bool>(row));
+    const tilemd::ThermoRow* got = nullptr;
+    for (const tilemd::ThermoRow& sample : rows) {
+      if (sample.step == step) got = &sample;
+    }
+    ASSERT_NE(got, nullptr);
+    EXPECT_NEAR(got->temperature, temp, 1.0e-9);
+    EXPECT_NEAR(got->potential_per_atom, pe, 1.0e-12);
+    EXPECT_NEAR(got->kinetic_per_atom, ke, 1.0e-12);
+    EXPECT_NEAR(got->total_per_atom, etotal, 1.0e-12);
+    const double ke_total = ke * static_cast<double>(n);
+    const double ideal_gap =
+        static_cast<double>(n) * tilemd::kMetalBoltz * temp - 2.0 * ke_total / 3.0;
+    const double volume = box[0] * box[1] * box[2];
+    const double expected = press + tilemd::kMetalNktv2p * ideal_gap / volume;
+    std::cout << std::scientific << std::setprecision(8) << "metal pressure step " << step
+              << " tilemd " << got->pressure << " lammps " << press << " plan " << expected << "\n";
+    EXPECT_NEAR(got->pressure, expected, 1.0e-3);
+  }
   std::filesystem::remove(xyz);
   std::filesystem::remove(dump);
 }

@@ -1,0 +1,6 @@
+# LAMMPS 22 Jul 2025 Update 4, units metal, pair_style eam, fix nve, thermo_modify norm yes.
+# Columns: step temp pe ke etotal press. Energies are per atom. Press is bar.
+# TileMD temperature matches temp. TileMD pressure is higher by
+# nktv2p * (N k_B T - 2 KE / 3) / V because the plan uses N k_B T.
+0 81.6227745937436 -3.537798571523164 0.01045288120077767 -3.527345690322386 1887.354944042384
+100 55.47272423809864 -3.534448945215772 0.00710401967135274 -3.52734492554442 3012.449230522403
