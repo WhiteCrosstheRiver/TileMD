@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -194,6 +195,47 @@ TEST(ClusterList, ReportsTileEfficiency) {
   const double melt32_ratio = efficiency(x, y, z, box);
   EXPECT_GT(melt32_ratio, 0.07);
   EXPECT_LT(melt32_ratio, 0.12);
+
+  std::vector<int> type32(static_cast<size_t>(n), 0);
+  const tilemd::ClusterGrid grid =
+      tilemd::BuildClusterGrid(box, x.data(), y.data(), z.data(), type32.data(), n, 2.8);
+  const tilemd::ClusterPairs list = tilemd::BuildClusterPairs(grid);
+  long long kernel_bytes = static_cast<long long>(grid.ncluster + 1) * 4;
+  for (int slot = 0; slot < static_cast<int>(grid.gid.size()); ++slot) {
+    kernel_bytes += 8;
+    if (grid.type[static_cast<size_t>(slot)] != tilemd::kMaskType &&
+        grid.gid[static_cast<size_t>(slot)] >= 0) {
+      kernel_bytes += 16;
+    }
+  }
+  for (int pair = 0; pair < static_cast<int>(list.cj.size()); ++pair) {
+    kernel_bytes += 8;
+    const int other = list.cj[static_cast<size_t>(pair)];
+    for (int local = 0; local < tilemd::kClusterSize; ++local) {
+      const int slot = other * tilemd::kClusterSize + local;
+      kernel_bytes += 8;
+      if (grid.type[static_cast<size_t>(slot)] != tilemd::kMaskType &&
+          grid.gid[static_cast<size_t>(slot)] >= 0) {
+        kernel_bytes += 16;
+      }
+    }
+  }
+  // Owning atom: read and write x, v (96), images (24), xref and pos_next (32).
+  kernel_bytes += static_cast<long long>(grid.n_real) * 152;
+  const double bytes_per_atom =
+      static_cast<double>(kernel_bytes) / static_cast<double>(grid.n_real);
+  const double upload =
+      (static_cast<double>(grid.gid.size()) * 8.0 + static_cast<double>(grid.ncluster + 1) * 4.0 +
+       static_cast<double>(list.cj.size()) * 8.0) /
+      static_cast<double>(grid.n_real);
+  std::cout << std::scientific << std::setprecision(9) << "fused kernel bytes/atom "
+            << bytes_per_atom << " list upload bytes/atom " << upload << " clusters "
+            << grid.ncluster << " pairs " << list.cj.size() << " kernel_bytes " << kernel_bytes
+            << "\n";
+  EXPECT_EQ(grid.ncluster, 4264);
+  EXPECT_EQ(static_cast<int>(list.cj.size()), 329108);
+  EXPECT_EQ(kernel_bytes, 69219396LL);
+  EXPECT_DOUBLE_EQ(bytes_per_atom, 2163.106125);
 }
 
 TEST(ClusterList, TileForcesMatchTheOracleOnFixtures) {

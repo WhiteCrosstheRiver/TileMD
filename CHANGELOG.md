@@ -25,6 +25,7 @@
 - M6 CPU BAOAB Langevin thermostat. The random draw is Philox4x32-10 keyed by seed, step, and atom id. Zero friction matches velocity Verlet. The device step does not apply it yet.
 - M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded, and this kernel has not been launched.
 - M6 `pos4` coordinate rounding. On `melt_4000` it moves the force by `5.81e-5` relative to the double-precision oracle, outside the `1e-5` tolerance. One hundred leapfrog steps on the 40-atom box move positions by at most `5.69e-8`.
+- M6 fused-step traffic on the 32k melt. Distinct global addresses in one step are 2163 bytes per atom, above the 60–110 byte target, because each kept cluster reloads `pos4`. This is a source count, not an Nsight measurement.
 - M7 CPU prototype of the TF32 and 3×TF32 pair score. It is not on the default force path. On the 4000-atom melt the 3×TF32 force error is outside the 1e-5 tolerance.
 - M7 compact-cell remeasure of that score. A cell of about 4 atoms lowers the melt force error from 7.9e-5 to 1.9e-5, which is still outside the tolerance.
 - M8 CPU pair-attention API. Lennard-Jones matches the double-precision oracle. A two-pass EAM funcfl evaluation matches LAMMPS `pair_style eam` on displaced fcc copper, including 100 steps of metal-unit velocity Verlet.
