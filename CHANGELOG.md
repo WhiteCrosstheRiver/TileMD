@@ -21,6 +21,7 @@
 - M5 column-width sweep. Targets of 64, 128, and 256 atoms per column keep the same inside-pair count and the same forces. None of them reaches the 40–60% efficiency expectation.
 - M6 CPU leapfrog integrator. Over 100 steps it matches velocity Verlet to round-off on the double-precision oracle.
 - M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded, and this kernel has not been launched.
+- M6 `pos4` coordinate rounding. On `melt_4000` it moves the force by `5.81e-5` relative to the double-precision oracle, outside the `1e-5` tolerance. One hundred leapfrog steps on the 40-atom box move positions by at most `5.69e-8`.
 - M7 CPU prototype of the TF32 and 3×TF32 pair score. It is not on the default force path. On the 4000-atom melt the 3×TF32 force error is outside the 1e-5 tolerance.
 - M7 compact-cell remeasure of that score. A cell of about 4 atoms lowers the melt force error from 7.9e-5 to 1.9e-5, which is still outside the tolerance.
 - M8 CPU pair-attention API. Lennard-Jones matches the double-precision oracle. A two-pass EAM funcfl evaluation matches LAMMPS `pair_style eam` on displaced fcc copper, including 100 steps of metal-unit velocity Verlet.
