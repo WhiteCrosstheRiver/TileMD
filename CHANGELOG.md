@@ -20,3 +20,4 @@
 - M6 CPU leapfrog integrator. Over 100 steps it matches velocity Verlet to round-off on the double-precision oracle.
 - M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded, and this kernel has not been launched.
 - M7 CPU prototype of the TF32 and 3×TF32 pair score. It is not on the default force path. On the 4000-atom melt the 3×TF32 force error is outside the 1e-5 tolerance.
+- M8 CPU pair-attention API. Lennard-Jones matches the double-precision oracle. A two-pass EAM funcfl evaluation matches LAMMPS `pair_style eam` on displaced fcc copper.

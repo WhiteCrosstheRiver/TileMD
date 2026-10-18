@@ -64,6 +64,10 @@ target_compile_features(tilemd_reference PUBLIC cxx_std_17)
 add_executable(tilemd_make_fixtures reference/make_fixtures.cpp)
 target_link_libraries(tilemd_make_fixtures PRIVATE tilemd_reference)
 
+add_library(tilemd_eam STATIC src/force/eam.cpp)
+target_link_libraries(tilemd_eam PUBLIC tilemd_headers)
+target_compile_features(tilemd_eam PUBLIC cxx_std_17)
+
 add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp)
 target_link_libraries(tilemd_cluster PUBLIC tilemd_headers)
 target_compile_features(tilemd_cluster PUBLIC cxx_std_17)
@@ -95,10 +99,11 @@ if(TILEMD_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp tests/unit/lj_reference_test.cpp
-                                 tests/unit/cluster_list_test.cpp tests/unit/integrator_test.cpp
-                                 tests/unit/tf32_pair_test.cpp)
+                                 tests/unit/cluster_list_test.cpp                                  tests/unit/integrator_test.cpp
+                                 tests/unit/tf32_pair_test.cpp
+                                 tests/unit/pair_attention_test.cpp)
   target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_reference
-                                                 tilemd_cluster)
+                                                 tilemd_cluster tilemd_eam)
   file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" TILEMD_SOURCE_DIR_FWD)
   target_compile_definitions(tilemd_cpu_tests PRIVATE TILEMD_SOURCE_DIR="${TILEMD_SOURCE_DIR_FWD}")
 

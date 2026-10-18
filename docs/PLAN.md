@@ -18,7 +18,7 @@
 | M5 Cluster-pair tiles (SIMT) | `m5-cluster-tiles` | in progress | G2+ | | CPU list and tile force match the oracle. The GPU warp tile kernel is selectable and has not been launched here. Tile efficiency is 0.0229 at 4k and 0.0085 at 32k, below the 40–60% expectation. |
 | M6 Fused single-kernel timestep | `m6-fused-step` | in progress | G2+, G3+ | | CPU leapfrog matches velocity Verlet to round-off over 100 steps. The GPU fused kernel reads `pos4` and rebuilds the host cluster list when the skin is exceeded. It has not been launched. |
 | M7 Tensor-core pair-attention tile | `m7-tensor-core` | in progress | G4 | | CPU 3×TF32 score is in `reference/tf32_pair.cpp` and is not the default path. On `melt_4000` the force relative error is 7.9e-5, outside T1. No tensor-core kernel, no drift run, no speed run. |
-| M8 Generic pair-attention API + EAM | `m8-pair-attention-api` | not started | G5 | | |
+| M8 Generic pair-attention API + EAM | `m8-pair-attention-api` | in progress | G5 | | CPU pair-attention API. LJ matches the oracle. Cu `Cu_u3.eam` matches LAMMPS `pair eam` to 1.4e-13 relative force. No GPU kernel, so the overhead gate is not measured. |
 
 States: `not started` → `in progress` → `in review` → `changes requested` → `merged`.
 
