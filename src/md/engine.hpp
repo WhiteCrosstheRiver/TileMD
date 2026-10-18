@@ -46,9 +46,9 @@ struct GpuForces {
   int max_neigh = 0;
 };
 
-// M3 engine: thread-per-atom neighbor list and LJ force. Plain launches and a
-// host sync each step. Spatial sorting of the atom arrays is intentionally
-// absent; the cell sort only orders the neighbor list.
+// Thread-per-atom neighbor list and LJ force. Plain launches and a host sync
+// each step. Rebuilds reorder atoms by a stable Morton cell code. Downloads
+// scatter back to the original global-id order.
 class Engine {
  public:
   explicit Engine(HostSystem system);

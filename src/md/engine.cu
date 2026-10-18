@@ -70,6 +70,22 @@ __device__ double MinImageDouble(double delta, double length) {
   return delta - length * rint(delta / length);
 }
 
+// 10-bit Morton code. Stage-1 boxes stay under 1024 cells per axis.
+__device__ unsigned Spread10(unsigned v) {
+  v &= 0x3ffu;
+  v = (v | (v << 16)) & 0x030000FFu;
+  v = (v | (v << 8)) & 0x0300F00Fu;
+  v = (v | (v << 4)) & 0x030C30C3u;
+  v = (v | (v << 2)) & 0x09249249u;
+  return v;
+}
+
+__device__ int MortonCell(int ix, int iy, int iz) {
+  unsigned code = Spread10(static_cast<unsigned>(ix)) | (Spread10(static_cast<unsigned>(iy)) << 1) |
+                  (Spread10(static_cast<unsigned>(iz)) << 2);
+  return static_cast<int>(code);
+}
+
 __device__ int CellCoord(float x, float inv_edge, int ncell) {
   int i = static_cast<int>(floorf(x * inv_edge));
   if (i < 0) i = 0;
@@ -139,8 +155,27 @@ __global__ void CellKeyKernel(const float4* pos, int* keys, int* indices, int n)
       CellCoord(p.y, static_cast<float>(c_ncell[1]) / static_cast<float>(c_box[1]), c_ncell[1]);
   int iz =
       CellCoord(p.z, static_cast<float>(c_ncell[2]) / static_cast<float>(c_box[2]), c_ncell[2]);
-  keys[i] = ix + c_ncell[0] * (iy + c_ncell[1] * iz);
+  keys[i] = MortonCell(ix, iy, iz);
   indices[i] = i;
+}
+
+template <typename T>
+__global__ void PermuteKernel(const T* in, T* out, const int* order, int n) {
+  int s = blockIdx.x * blockDim.x + threadIdx.x;
+  if (s >= n) return;
+  out[s] = in[order[s]];
+}
+
+__global__ void IdentityKernel(int* ids, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  ids[i] = i;
+}
+
+__global__ void FillSlotKernel(const int* gid, int* slot, int n) {
+  int s = blockIdx.x * blockDim.x + threadIdx.x;
+  if (s >= n) return;
+  slot[gid[s]] = s;
 }
 
 __global__ void FillCellStart(const int* sorted_keys, int* cell_start, int n, int ncell) {
@@ -201,14 +236,17 @@ __global__ void NeighborKernel(const float4* pos, const int* cell_start, const i
 // Index order matches the oracle's j loop. Cell order is deterministic too, but
 // summing 1e36 pair terms in a different order misses the virial gate on
 // boundary_500. The list is still built in cell order above.
-__global__ void SortNeighbors(int* nl, const int* nn, int n) {
+// Neighbors are stored as sorted slots. Ordering by original global id keeps the
+// pair sum in the same sequence as the oracle's j loop.
+__global__ void SortNeighbors(int* nl, const int* nn, const int* gid, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int count = nn[i];
   for (int a = 1; a < count; ++a) {
     int key = nl[static_cast<long long>(a) * n + i];
+    int key_gid = gid[key];
     int b = a;
-    while (b > 0 && nl[static_cast<long long>(b - 1) * n + i] > key) {
+    while (b > 0 && gid[nl[static_cast<long long>(b - 1) * n + i]] > key_gid) {
       nl[static_cast<long long>(b) * n + i] = nl[static_cast<long long>(b - 1) * n + i];
       --b;
     }
@@ -325,6 +363,14 @@ int RoundUp32(int value) {
   return (value + 31) & ~31;
 }
 
+template <typename T>
+void PermuteBuffer(T* data, T* scratch, const int* order, int n) {
+  PermuteKernel<T><<<Grid(n), kBlock>>>(data, scratch, order, n);
+  CheckLaunch();
+  TILEMD_CHECK(
+      cudaMemcpy(data, scratch, sizeof(T) * static_cast<size_t>(n), cudaMemcpyDeviceToDevice));
+}
+
 }  // namespace
 
 struct Engine::Impl {
@@ -360,10 +406,16 @@ struct Engine::Impl {
   double* wxy = nullptr;
   double* wxz = nullptr;
   double* wyz = nullptr;
+  int* gid = nullptr;
+  int* slot_of_gid = nullptr;
   int* keys = nullptr;
   int* sorted_keys = nullptr;
   int* indices = nullptr;
   int* sorted_indices = nullptr;
+  double* scratch_double = nullptr;
+  int* scratch_int = nullptr;
+  float* scratch_float = nullptr;
+  float4* scratch_float4 = nullptr;
   int* cell_start = nullptr;
   int* nn = nullptr;
   int* nl = nullptr;
@@ -375,6 +427,7 @@ struct Engine::Impl {
   void Upload();
   void ClearFlags();
   void BuildCells();
+  void ApplySpatialOrder();
   void ReallocList(int capacity);
   int BuildNeighbors(bool grow);
   void ComputeForce();
@@ -403,8 +456,14 @@ struct Engine::Impl {
     cudaFree(wxy);
     cudaFree(wxz);
     cudaFree(wyz);
+    cudaFree(gid);
+    cudaFree(slot_of_gid);
     cudaFree(keys);
     cudaFree(sorted_keys);
+    cudaFree(scratch_double);
+    cudaFree(scratch_int);
+    cudaFree(scratch_float);
+    cudaFree(scratch_float4);
     cudaFree(indices);
     cudaFree(sorted_indices);
     cudaFree(cell_start);
@@ -490,6 +549,7 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
     for (int dim = 0; dim < 3; ++dim) {
       impl_->ncell[dim] = static_cast<int>(std::floor(in.box[dim] / impl_->reach));
       if (impl_->ncell[dim] < 3) throw std::runtime_error("box too small for 3 cells");
+      if (impl_->ncell[dim] > 1024) throw std::runtime_error("more than 1024 cells on one axis");
     }
     impl_->ncell_tot = impl_->ncell[0] * impl_->ncell[1] * impl_->ncell[2];
 
@@ -530,6 +590,12 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
     impl_->wxy = static_cast<double*>(MustMalloc(sizeof(double) * n));
     impl_->wxz = static_cast<double*>(MustMalloc(sizeof(double) * n));
     impl_->wyz = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->gid = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->slot_of_gid = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->scratch_double = static_cast<double*>(MustMalloc(sizeof(double) * n));
+    impl_->scratch_int = static_cast<int*>(MustMalloc(sizeof(int) * n));
+    impl_->scratch_float = static_cast<float*>(MustMalloc(sizeof(float) * n));
+    impl_->scratch_float4 = static_cast<float4*>(MustMalloc(sizeof(float4) * n));
     impl_->keys = static_cast<int*>(MustMalloc(sizeof(int) * n));
     impl_->sorted_keys = static_cast<int*>(MustMalloc(sizeof(int) * n));
     impl_->indices = static_cast<int*>(MustMalloc(sizeof(int) * n));
@@ -558,6 +624,12 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
     TILEMD_CHECK(cudaMemset(impl_->imgy, 0, sizeof(int) * n));
     TILEMD_CHECK(cudaMemset(impl_->imgz, 0, sizeof(int) * n));
     TILEMD_CHECK(cudaMemcpy(impl_->type, in.type.data(), sizeof(int) * n, cudaMemcpyHostToDevice));
+    std::vector<int> initial_gid(n);
+    for (int i = 0; i < n; ++i) initial_gid[i] = i;
+    TILEMD_CHECK(
+        cudaMemcpy(impl_->gid, initial_gid.data(), sizeof(int) * n, cudaMemcpyHostToDevice));
+    TILEMD_CHECK(cudaMemcpy(impl_->slot_of_gid, initial_gid.data(), sizeof(int) * n,
+                            cudaMemcpyHostToDevice));
     TILEMD_CHECK(cudaMemset(impl_->fx, 0, sizeof(float) * n));
     TILEMD_CHECK(cudaMemset(impl_->fy, 0, sizeof(float) * n));
     TILEMD_CHECK(cudaMemset(impl_->fz, 0, sizeof(float) * n));
@@ -612,9 +684,40 @@ void Engine::Impl::ClearFlags() {
 void Engine::Impl::BuildCells() {
   CellKeyKernel<<<Grid(n), kBlock>>>(pos, keys, indices, n);
   CheckLaunch();
+  // Stable: atoms that share a Morton cell keep their previous order.
   TILEMD_CHECK(cub::DeviceRadixSort::SortPairs(cub_temp, cub_bytes, keys, sorted_keys, indices,
                                                sorted_indices, n));
+}
+
+void Engine::Impl::ApplySpatialOrder() {
+  PermuteBuffer(x, scratch_double, sorted_indices, n);
+  PermuteBuffer(y, scratch_double, sorted_indices, n);
+  PermuteBuffer(z, scratch_double, sorted_indices, n);
+  PermuteBuffer(vx, scratch_double, sorted_indices, n);
+  PermuteBuffer(vy, scratch_double, sorted_indices, n);
+  PermuteBuffer(vz, scratch_double, sorted_indices, n);
+  PermuteBuffer(imgx, scratch_int, sorted_indices, n);
+  PermuteBuffer(imgy, scratch_int, sorted_indices, n);
+  PermuteBuffer(imgz, scratch_int, sorted_indices, n);
+  PermuteBuffer(type, scratch_int, sorted_indices, n);
+  PermuteBuffer(gid, scratch_int, sorted_indices, n);
+  PermuteBuffer(pos, scratch_float4, sorted_indices, n);
+  PermuteBuffer(xref, scratch_float4, sorted_indices, n);
+  PermuteBuffer(fx, scratch_float, sorted_indices, n);
+  PermuteBuffer(fy, scratch_float, sorted_indices, n);
+  PermuteBuffer(fz, scratch_float, sorted_indices, n);
+  PermuteBuffer(energy, scratch_double, sorted_indices, n);
+  PermuteBuffer(wxx, scratch_double, sorted_indices, n);
+  PermuteBuffer(wyy, scratch_double, sorted_indices, n);
+  PermuteBuffer(wzz, scratch_double, sorted_indices, n);
+  PermuteBuffer(wxy, scratch_double, sorted_indices, n);
+  PermuteBuffer(wxz, scratch_double, sorted_indices, n);
+  PermuteBuffer(wyz, scratch_double, sorted_indices, n);
+  FillSlotKernel<<<Grid(n), kBlock>>>(gid, slot_of_gid, n);
+  CheckLaunch();
   FillCellStart<<<1, 1>>>(sorted_keys, cell_start, n, ncell_tot);
+  CheckLaunch();
+  IdentityKernel<<<Grid(n), kBlock>>>(sorted_indices, n);
   CheckLaunch();
 }
 
@@ -627,6 +730,7 @@ void Engine::Impl::ReallocList(int capacity) {
 
 int Engine::Impl::BuildNeighbors(bool grow) {
   BuildCells();
+  ApplySpatialOrder();
   for (int attempt = 0; attempt < 8; ++attempt) {
     ClearFlags();
     NeighborKernel<<<Grid(n), kBlock>>>(pos, cell_start, sorted_indices, nn, nl, max_neigh, n,
@@ -637,7 +741,7 @@ int Engine::Impl::BuildNeighbors(bool grow) {
     TILEMD_CHECK(cudaMemcpy(&host_status, status, sizeof(host_status), cudaMemcpyDeviceToHost));
     TILEMD_CHECK(cudaMemcpy(&needed, max_nn, sizeof(needed), cudaMemcpyDeviceToHost));
     if (!host_status.overflow) {
-      SortNeighbors<<<Grid(n), kBlock>>>(nl, nn, n);
+      SortNeighbors<<<Grid(n), kBlock>>>(nl, nn, gid, n);
       CheckLaunch();
       TILEMD_CHECK(cudaMemcpy(xref, pos, sizeof(float4) * n, cudaMemcpyDeviceToDevice));
       ++rebuild_count;
@@ -685,8 +789,22 @@ GpuForces Engine::Impl::DownloadForces(int overflow) {
   TILEMD_CHECK(cudaMemcpy(ht.data(), type, sizeof(int) * n, cudaMemcpyDeviceToHost));
   TILEMD_CHECK(cudaMemcpy(hnn.data(), nn, sizeof(int) * n, cudaMemcpyDeviceToHost));
   TILEMD_CHECK(cudaMemcpy(hnl.data(), nl, sizeof(int) * hnl.size(), cudaMemcpyDeviceToHost));
+  std::vector<int> hgid(n);
+  std::vector<int> slot(n);
+  std::vector<float> stored_fx = out.fx;
+  std::vector<float> stored_fy = out.fy;
+  std::vector<float> stored_fz = out.fz;
+  TILEMD_CHECK(cudaMemcpy(hgid.data(), gid, sizeof(int) * n, cudaMemcpyDeviceToHost));
+  for (int s = 0; s < n; ++s) slot[hgid[s]] = s;
+  for (int s = 0; s < n; ++s) {
+    out.fx[hgid[s]] = stored_fx[s];
+    out.fy[hgid[s]] = stored_fy[s];
+    out.fz[hgid[s]] = stored_fz[s];
+  }
   const bool force_shift = system.shift == Shift::Force;
-  for (int i = 0; i < n; ++i) {
+  // Original-id order, then neighbor global id. That is the oracle's association.
+  for (int g = 0; g < n; ++g) {
+    const int i = slot[g];
     for (int k = 0; k < hnn[i]; ++k) {
       const int j = hnl[static_cast<size_t>(k) * n + i];
       const PairRow p = host_pairs[ht[i] * kMaxTypes + ht[j]];
@@ -766,24 +884,27 @@ void Engine::Run(int steps) {
   }
 }
 
+void ScatterToGid(const double* src, const int* gid, int n, std::vector<double>& dst) {
+  std::vector<double> stored(n);
+  std::vector<int> hgid(n);
+  TILEMD_CHECK(cudaMemcpy(stored.data(), src, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  TILEMD_CHECK(cudaMemcpy(hgid.data(), gid, sizeof(int) * n, cudaMemcpyDeviceToHost));
+  dst.resize(n);
+  for (int s = 0; s < n; ++s) dst[hgid[s]] = stored[s];
+}
+
 void Engine::DownloadPositions(std::vector<double>& x, std::vector<double>& y,
                                std::vector<double>& z) const {
-  x.resize(impl_->n);
-  y.resize(impl_->n);
-  z.resize(impl_->n);
-  TILEMD_CHECK(cudaMemcpy(x.data(), impl_->x, sizeof(double) * impl_->n, cudaMemcpyDeviceToHost));
-  TILEMD_CHECK(cudaMemcpy(y.data(), impl_->y, sizeof(double) * impl_->n, cudaMemcpyDeviceToHost));
-  TILEMD_CHECK(cudaMemcpy(z.data(), impl_->z, sizeof(double) * impl_->n, cudaMemcpyDeviceToHost));
+  ScatterToGid(impl_->x, impl_->gid, impl_->n, x);
+  ScatterToGid(impl_->y, impl_->gid, impl_->n, y);
+  ScatterToGid(impl_->z, impl_->gid, impl_->n, z);
 }
 
 void Engine::DownloadVelocities(std::vector<double>& vx, std::vector<double>& vy,
                                 std::vector<double>& vz) const {
-  vx.resize(impl_->n);
-  vy.resize(impl_->n);
-  vz.resize(impl_->n);
-  TILEMD_CHECK(cudaMemcpy(vx.data(), impl_->vx, sizeof(double) * impl_->n, cudaMemcpyDeviceToHost));
-  TILEMD_CHECK(cudaMemcpy(vy.data(), impl_->vy, sizeof(double) * impl_->n, cudaMemcpyDeviceToHost));
-  TILEMD_CHECK(cudaMemcpy(vz.data(), impl_->vz, sizeof(double) * impl_->n, cudaMemcpyDeviceToHost));
+  ScatterToGid(impl_->vx, impl_->gid, impl_->n, vx);
+  ScatterToGid(impl_->vy, impl_->gid, impl_->n, vy);
+  ScatterToGid(impl_->vz, impl_->gid, impl_->n, vz);
 }
 
 }  // namespace tilemd

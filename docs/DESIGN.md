@@ -14,7 +14,7 @@ Living notes for data layout, kernels, and invariants. A milestone fills a secti
 
 ## GPU v0
 
-The M3 engine in `src/md/engine.cu` is one thread per atom. Atom arrays stay in input order. A cell list only builds the neighbor list: the cell edge is `(r_c + skin) * (1 + 1e-4) + 1e-5`, `floor(L / edge)` must be at least 3, and a 27-cell periodic stencil covers the cutoff. CUB stable-sorts `(cell, atom)` pairs to fill the cells. Each atom's neighbors are then insertion-sorted by index so the pair order matches the oracle's `j` loop.
+The engine in `src/md/engine.cu` is one thread per atom. Each neighbor rebuild stable-sorts atoms by a 10-bit Morton code of the cell and permutes every per-atom array, including `gid`. Downloads scatter positions, velocities, and forces back to the original global id. Within a cell, the previous order is kept. Neighbor slots are then sorted by that global id so the pair sum follows the oracle's atom order. A cell list builds the neighbor list: the cell edge is `(r_c + skin) * (1 + 1e-4) + 1e-5`, `floor(L / edge)` must be at least 3, and a 27-cell periodic stencil covers the cutoff. CUB stable-sorts `(cell, atom)` pairs to fill the cells. Each atom's neighbors are then insertion-sorted by index so the pair order matches the oracle's `j` loop.
 
 The master coordinates and velocities are double. Neighbor search uses a wrapped float shadow and a cutoff padded by the same factor as the cell edge, so a pair the force kernel would accept is not dropped by float rounding. The force kernel reads the double coordinates, evaluates the LJ polynomial in double, and stores float forces. There are no floating-point atomics on the step path.
 
