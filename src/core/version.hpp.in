@@ -1,0 +1,5 @@
+#pragma once
+
+namespace tilemd {
+inline constexpr const char* kVersion = "@PROJECT_VERSION@";
+}  // namespace tilemd

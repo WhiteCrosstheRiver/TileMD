@@ -1,0 +1,37 @@
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.14.32
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+-- TileMD CUDA architectures: 80;90
+-- TileMD fast-math: OFF
+-- Configuring done (0.4s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/USER/Desktop/codes/TileMD/build
+ninja: no work to do.
+Internal ctest changing into directory: C:/Users/USER/Desktop/codes/TileMD/build
+Test project C:/Users/USER/Desktop/codes/TileMD/build
+    Start 1: cpu_smoke
+1/2 Test #1: cpu_smoke ........................   Passed    0.01 sec
+    Start 3: tilemd_version
+2/2 Test #3: tilemd_version ...................   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Label Time Summary:
+cpu    =   0.01 sec*proc (2 tests)
+
+Total Test time (real) =   0.01 sec
+
+=== GPU tests ===
+Internal ctest changing into directory: C:/Users/USER/Desktop/codes/TileMD/build
+Test project C:/Users/USER/Desktop/codes/TileMD/build
+    Start 2: gpu_smoke
+1/1 Test #2: gpu_smoke ........................   Passed    0.17 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+gpu    =   0.17 sec*proc (1 test)
+
+Total Test time (real) =   0.17 sec
