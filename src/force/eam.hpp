@@ -7,6 +7,10 @@
 
 namespace tilemd {
 
+// LAMMPS metal units convert eV/Å and g/mol into Å/ps. Velocity Verlet uses
+// v += dt * f / m * kMetalFtm2v. Reduced LJ units omit this factor.
+inline constexpr double kMetalFtm2v = 1.0 / 1.0364269e-4;
+
 // Single-element funcfl table, read and splined the way LAMMPS pair_style eam
 // does. Metal units: distance in Angstrom, energy in eV. Pass 0 sums the
 // electron density. Pass 1 applies (F'(rho_i) + F'(rho_j)) rho'(r) + phi'(r).
