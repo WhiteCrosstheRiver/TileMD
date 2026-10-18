@@ -46,9 +46,10 @@ struct GpuForces {
   int max_neigh = 0;
 };
 
-// Thread-per-atom neighbor list and LJ force. Plain launches and a host sync
-// each step. Rebuilds reorder atoms by a stable Morton cell code. Downloads
-// scatter back to the original global-id order.
+// Thread-per-atom neighbor list and LJ force. Rebuilds reorder atoms by a
+// stable Morton cell code. The step loop decides that rebuild on the device
+// and copies status back only when Run returns. Downloads scatter to the
+// original global-id order.
 class Engine {
  public:
   explicit Engine(HostSystem system);

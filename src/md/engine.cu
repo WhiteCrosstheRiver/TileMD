@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cub/block/block_reduce.cuh>
 #include <cub/device/device_radix_sort.cuh>
 #include <stdexcept>
 #include <string>
@@ -40,6 +41,8 @@ __constant__ double c_box[3];
 __constant__ int c_ncell[3];
 __constant__ int c_shift;
 __constant__ float c_neigh_cut2;
+__constant__ int c_rebuild_every;
+__constant__ float c_trigger2;
 
 #define TILEMD_CHECK(call)                                                               \
   do {                                                                                   \
@@ -145,7 +148,10 @@ __global__ void RefreshShadow(const double* x, const double* y, const double* z,
                        __int_as_float(type[i]));
 }
 
-__global__ void CellKeyKernel(const float4* pos, int* keys, int* indices, int n) {
+__device__ bool RebuildSkipped(const int* gate) { return gate != nullptr && *gate == 0; }
+
+__global__ void CellKeyKernel(const float4* pos, int* keys, int* indices, int n, const int* gate) {
+  if (RebuildSkipped(gate)) return;
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float4 p = pos[i];
@@ -160,26 +166,39 @@ __global__ void CellKeyKernel(const float4* pos, int* keys, int* indices, int n)
 }
 
 template <typename T>
-__global__ void PermuteKernel(const T* in, T* out, const int* order, int n) {
+__global__ void PermuteKernel(const T* in, T* out, const int* order, int n, const int* gate) {
+  if (RebuildSkipped(gate)) return;
   int s = blockIdx.x * blockDim.x + threadIdx.x;
   if (s >= n) return;
   out[s] = in[order[s]];
 }
 
-__global__ void IdentityKernel(int* ids, int n) {
+template <typename T>
+__global__ void CopyBackKernel(T* data, const T* scratch, int n, const int* gate) {
+  if (RebuildSkipped(gate)) return;
+  int s = blockIdx.x * blockDim.x + threadIdx.x;
+  if (s >= n) return;
+  data[s] = scratch[s];
+}
+
+__global__ void IdentityKernel(int* ids, int n, const int* gate) {
+  if (RebuildSkipped(gate)) return;
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   ids[i] = i;
 }
 
-__global__ void FillSlotKernel(const int* gid, int* slot, int n) {
+__global__ void FillSlotKernel(const int* gid, int* slot, int n, const int* gate) {
+  if (RebuildSkipped(gate)) return;
   int s = blockIdx.x * blockDim.x + threadIdx.x;
   if (s >= n) return;
   slot[gid[s]] = s;
 }
 
-__global__ void FillCellStart(const int* sorted_keys, int* cell_start, int n, int ncell) {
+__global__ void FillCellStart(const int* sorted_keys, int* cell_start, int n, int ncell,
+                              const int* gate) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  if (RebuildSkipped(gate)) return;
   for (int c = 0; c <= ncell; ++c) cell_start[c] = n;
   if (n == 0) return;
   int first = sorted_keys[0];
@@ -195,7 +214,8 @@ __global__ void FillCellStart(const int* sorted_keys, int* cell_start, int n, in
 
 __global__ void NeighborKernel(const float4* pos, const int* cell_start, const int* cell_atoms,
                                int* nn, int* nl, int max_neigh, int n, int* max_nn,
-                               DeviceStatus* status) {
+                               DeviceStatus* status, const int* gate) {
+  if (RebuildSkipped(gate)) return;
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float4 pi = pos[i];
@@ -238,7 +258,8 @@ __global__ void NeighborKernel(const float4* pos, const int* cell_start, const i
 // boundary_500. The list is still built in cell order above.
 // Neighbors are stored as sorted slots. Ordering by original global id keeps the
 // pair sum in the same sequence as the oracle's j loop.
-__global__ void SortNeighbors(int* nl, const int* nn, const int* gid, int n) {
+__global__ void SortNeighbors(int* nl, const int* nn, const int* gid, int n, const int* gate) {
+  if (RebuildSkipped(gate)) return;
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   int count = nn[i];
@@ -348,14 +369,59 @@ __global__ void Kick(double* vx, double* vy, double* vz, const float* fx, const 
   vz[i] += scale * static_cast<double>(fz[i]);
 }
 
+struct MaxFloat {
+  __device__ float operator()(float a, float b) const { return a > b ? a : b; }
+};
+
 __global__ void DispKernel(const float4* pos, const float4* xref, int n, DeviceStatus* status) {
+  using Reduce = cub::BlockReduce<float, kBlock>;
+  __shared__ typename Reduce::TempStorage reduce_storage;
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  float d2 = 0.f;
+  if (i < n) {
+    float dx = MinImage(pos[i].x - xref[i].x, static_cast<float>(c_box[0]));
+    float dy = MinImage(pos[i].y - xref[i].y, static_cast<float>(c_box[1]));
+    float dz = MinImage(pos[i].z - xref[i].z, static_cast<float>(c_box[2]));
+    d2 = dx * dx + dy * dy + dz * dz;
+  }
+  float block_max = Reduce(reduce_storage).Reduce(d2, MaxFloat());
+  if (threadIdx.x == 0) {
+    atomicMax(reinterpret_cast<int*>(&status->max_disp2_bits), __float_as_int(block_max));
+  }
+}
+
+__global__ void ResetDisplacement(DeviceStatus* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  status->max_disp2_bits = 0.f;
+  status->need_rebuild = 0;
+}
+
+__global__ void DecideRebuild(DeviceStatus* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  float d2 = status->max_disp2_bits;
+  status->need_rebuild = (c_rebuild_every || d2 > c_trigger2) ? 1 : 0;
+}
+
+__global__ void ZeroMaxNn(int* max_nn, const int* gate) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  if (RebuildSkipped(gate)) return;
+  *max_nn = 0;
+}
+
+__global__ void StoreXrefIf(float4* xref, const float4* pos, int n, const int* gate) {
+  if (RebuildSkipped(gate)) return;
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  float dx = pos[i].x - xref[i].x;
-  float dy = pos[i].y - xref[i].y;
-  float dz = pos[i].z - xref[i].z;
-  float d2 = dx * dx + dy * dy + dz * dz;
-  atomicMax(reinterpret_cast<int*>(&status->max_disp2_bits), __float_as_int(d2));
+  xref[i] = pos[i];
+}
+
+__global__ void AccountRebuild(DeviceStatus* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  if (status->need_rebuild) {
+    status->rebuild_count += 1;
+    status->max_disp2_bits = 0.f;
+  }
+  status->need_rebuild = 0;
 }
 
 int RoundUp32(int value) {
@@ -365,10 +431,16 @@ int RoundUp32(int value) {
 
 template <typename T>
 void PermuteBuffer(T* data, T* scratch, const int* order, int n) {
-  PermuteKernel<T><<<Grid(n), kBlock>>>(data, scratch, order, n);
+  PermuteKernel<T><<<Grid(n), kBlock>>>(data, scratch, order, n, nullptr);
   CheckLaunch();
   TILEMD_CHECK(
       cudaMemcpy(data, scratch, sizeof(T) * static_cast<size_t>(n), cudaMemcpyDeviceToDevice));
+}
+
+template <typename T>
+void QueuePermute(T* data, T* scratch, const int* order, int n, const int* gate) {
+  PermuteKernel<T><<<Grid(n), kBlock>>>(data, scratch, order, n, gate);
+  CopyBackKernel<T><<<Grid(n), kBlock>>>(data, scratch, n, gate);
 }
 
 }  // namespace
@@ -428,6 +500,7 @@ struct Engine::Impl {
   void ClearFlags();
   void BuildCells();
   void ApplySpatialOrder();
+  void QueueRebuild();
   void ReallocList(int capacity);
   int BuildNeighbors(bool grow);
   void ComputeForce();
@@ -606,6 +679,8 @@ Engine::Engine(HostSystem system) : impl_(new Impl) {
         static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(impl_->max_neigh) * n));
     impl_->max_nn = static_cast<int*>(MustMalloc(sizeof(int)));
     impl_->status = static_cast<DeviceStatus*>(MustMalloc(sizeof(DeviceStatus)));
+    TILEMD_CHECK(cudaMemset(impl_->status, 0, sizeof(DeviceStatus)));
+    TILEMD_CHECK(cudaMemset(impl_->max_nn, 0, sizeof(int)));
 
     std::vector<double> zeros(n, 0.0);
     const double* vx = in.vx.empty() ? zeros.data() : in.vx.data();
@@ -661,28 +736,39 @@ Engine::~Engine() { delete impl_; }
 
 int Engine::NumAtoms() const { return impl_->n; }
 int Engine::MaxNeigh() const { return impl_->max_neigh; }
-int Engine::RebuildCount() const { return impl_->rebuild_count; }
+int Engine::RebuildCount() const {
+  DeviceStatus snapshot{};
+  TILEMD_CHECK(cudaMemcpy(&snapshot, impl_->status, sizeof(snapshot), cudaMemcpyDeviceToHost));
+  return impl_->rebuild_count + snapshot.rebuild_count;
+}
 
 void Engine::Impl::Upload() {
   double box[3] = {system.box[0], system.box[1], system.box[2]};
   int shift = static_cast<int>(system.shift);
   float neigh_cut2 = static_cast<float>(reach * reach);
+  int rebuild_every = system.rebuild_every_step ? 1 : 0;
+  float trigger2 = static_cast<float>((system.skin * 0.5) * (system.skin * 0.5));
   TILEMD_CHECK(cudaMemcpyToSymbol(c_pairs, host_pairs, sizeof(host_pairs)));
   TILEMD_CHECK(cudaMemcpyToSymbol(c_box, box, sizeof(box)));
   TILEMD_CHECK(cudaMemcpyToSymbol(c_ncell, ncell, sizeof(ncell)));
   TILEMD_CHECK(cudaMemcpyToSymbol(c_shift, &shift, sizeof(shift)));
   TILEMD_CHECK(cudaMemcpyToSymbol(c_neigh_cut2, &neigh_cut2, sizeof(neigh_cut2)));
+  TILEMD_CHECK(cudaMemcpyToSymbol(c_rebuild_every, &rebuild_every, sizeof(rebuild_every)));
+  TILEMD_CHECK(cudaMemcpyToSymbol(c_trigger2, &trigger2, sizeof(trigger2)));
 }
 
 void Engine::Impl::ClearFlags() {
+  DeviceStatus previous{};
+  TILEMD_CHECK(cudaMemcpy(&previous, status, sizeof(previous), cudaMemcpyDeviceToHost));
   DeviceStatus blank{};
+  blank.rebuild_count = previous.rebuild_count;
   TILEMD_CHECK(cudaMemcpy(status, &blank, sizeof(blank), cudaMemcpyHostToDevice));
   int zero = 0;
   TILEMD_CHECK(cudaMemcpy(max_nn, &zero, sizeof(zero), cudaMemcpyHostToDevice));
 }
 
 void Engine::Impl::BuildCells() {
-  CellKeyKernel<<<Grid(n), kBlock>>>(pos, keys, indices, n);
+  CellKeyKernel<<<Grid(n), kBlock>>>(pos, keys, indices, n, nullptr);
   CheckLaunch();
   // Stable: atoms that share a Morton cell keep their previous order.
   TILEMD_CHECK(cub::DeviceRadixSort::SortPairs(cub_temp, cub_bytes, keys, sorted_keys, indices,
@@ -713,12 +799,55 @@ void Engine::Impl::ApplySpatialOrder() {
   PermuteBuffer(wxy, scratch_double, sorted_indices, n);
   PermuteBuffer(wxz, scratch_double, sorted_indices, n);
   PermuteBuffer(wyz, scratch_double, sorted_indices, n);
-  FillSlotKernel<<<Grid(n), kBlock>>>(gid, slot_of_gid, n);
+  FillSlotKernel<<<Grid(n), kBlock>>>(gid, slot_of_gid, n, nullptr);
   CheckLaunch();
-  FillCellStart<<<1, 1>>>(sorted_keys, cell_start, n, ncell_tot);
+  FillCellStart<<<1, 1>>>(sorted_keys, cell_start, n, ncell_tot, nullptr);
   CheckLaunch();
-  IdentityKernel<<<Grid(n), kBlock>>>(sorted_indices, n);
+  IdentityKernel<<<Grid(n), kBlock>>>(sorted_indices, n, nullptr);
   CheckLaunch();
+}
+
+void Engine::Impl::QueueRebuild() {
+  // The host does not read the flag. Kernels that would change atom order or
+  // the list return immediately when need_rebuild is clear. CUB has no such
+  // prologue, so the sort is queued every step until a conditional graph node
+  // can skip it. Its output is ignored unless the flag is set.
+  const int* gate = &status->need_rebuild;
+  CellKeyKernel<<<Grid(n), kBlock>>>(pos, keys, indices, n, gate);
+  TILEMD_CHECK(cub::DeviceRadixSort::SortPairs(cub_temp, cub_bytes, keys, sorted_keys, indices,
+                                               sorted_indices, n));
+  QueuePermute(x, scratch_double, sorted_indices, n, gate);
+  QueuePermute(y, scratch_double, sorted_indices, n, gate);
+  QueuePermute(z, scratch_double, sorted_indices, n, gate);
+  QueuePermute(vx, scratch_double, sorted_indices, n, gate);
+  QueuePermute(vy, scratch_double, sorted_indices, n, gate);
+  QueuePermute(vz, scratch_double, sorted_indices, n, gate);
+  QueuePermute(imgx, scratch_int, sorted_indices, n, gate);
+  QueuePermute(imgy, scratch_int, sorted_indices, n, gate);
+  QueuePermute(imgz, scratch_int, sorted_indices, n, gate);
+  QueuePermute(type, scratch_int, sorted_indices, n, gate);
+  QueuePermute(gid, scratch_int, sorted_indices, n, gate);
+  QueuePermute(pos, scratch_float4, sorted_indices, n, gate);
+  QueuePermute(xref, scratch_float4, sorted_indices, n, gate);
+  QueuePermute(fx, scratch_float, sorted_indices, n, gate);
+  QueuePermute(fy, scratch_float, sorted_indices, n, gate);
+  QueuePermute(fz, scratch_float, sorted_indices, n, gate);
+  QueuePermute(energy, scratch_double, sorted_indices, n, gate);
+  QueuePermute(wxx, scratch_double, sorted_indices, n, gate);
+  QueuePermute(wyy, scratch_double, sorted_indices, n, gate);
+  QueuePermute(wzz, scratch_double, sorted_indices, n, gate);
+  QueuePermute(wxy, scratch_double, sorted_indices, n, gate);
+  QueuePermute(wxz, scratch_double, sorted_indices, n, gate);
+  QueuePermute(wyz, scratch_double, sorted_indices, n, gate);
+  FillSlotKernel<<<Grid(n), kBlock>>>(gid, slot_of_gid, n, gate);
+  FillCellStart<<<1, 1>>>(sorted_keys, cell_start, n, ncell_tot, gate);
+  IdentityKernel<<<Grid(n), kBlock>>>(sorted_indices, n, gate);
+  ZeroMaxNn<<<1, 1>>>(max_nn, gate);
+  NeighborKernel<<<Grid(n), kBlock>>>(pos, cell_start, sorted_indices, nn, nl, max_neigh, n, max_nn,
+                                      status, gate);
+  SortNeighbors<<<Grid(n), kBlock>>>(nl, nn, gid, n, gate);
+  StoreXrefIf<<<Grid(n), kBlock>>>(xref, pos, n, gate);
+  AccountRebuild<<<1, 1>>>(status);
 }
 
 void Engine::Impl::ReallocList(int capacity) {
@@ -734,14 +863,14 @@ int Engine::Impl::BuildNeighbors(bool grow) {
   for (int attempt = 0; attempt < 8; ++attempt) {
     ClearFlags();
     NeighborKernel<<<Grid(n), kBlock>>>(pos, cell_start, sorted_indices, nn, nl, max_neigh, n,
-                                        max_nn, status);
+                                        max_nn, status, nullptr);
     CheckLaunch();
     DeviceStatus host_status{};
     int needed = 0;
     TILEMD_CHECK(cudaMemcpy(&host_status, status, sizeof(host_status), cudaMemcpyDeviceToHost));
     TILEMD_CHECK(cudaMemcpy(&needed, max_nn, sizeof(needed), cudaMemcpyDeviceToHost));
     if (!host_status.overflow) {
-      SortNeighbors<<<Grid(n), kBlock>>>(nl, nn, gid, n);
+      SortNeighbors<<<Grid(n), kBlock>>>(nl, nn, gid, n, nullptr);
       CheckLaunch();
       TILEMD_CHECK(cudaMemcpy(xref, pos, sizeof(float4) * n, cudaMemcpyDeviceToDevice));
       ++rebuild_count;
@@ -856,31 +985,32 @@ void Engine::Run(int steps) {
   const int n = impl_->n;
   const double dt = impl_->system.dt;
   const double inv_mass = 1.0 / impl_->system.mass;
-  const double trigger = (impl_->system.skin * 0.5) * (impl_->system.skin * 0.5);
   for (int step = 0; step < steps; ++step) {
     KickDrift<<<Grid(n), kBlock>>>(impl_->x, impl_->y, impl_->z, impl_->vx, impl_->vy, impl_->vz,
                                    impl_->fx, impl_->fy, impl_->fz, impl_->imgx, impl_->imgy,
                                    impl_->imgz, n, dt, inv_mass);
-    CheckLaunch();
     RefreshShadow<<<Grid(n), kBlock>>>(impl_->x, impl_->y, impl_->z, impl_->type, impl_->pos, n);
-    CheckLaunch();
-    bool rebuild = impl_->system.rebuild_every_step;
-    if (!rebuild) {
-      impl_->ClearFlags();
-      DispKernel<<<Grid(n), kBlock>>>(impl_->pos, impl_->xref, n, impl_->status);
-      CheckLaunch();
-      DeviceStatus status{};
-      TILEMD_CHECK(cudaMemcpy(&status, impl_->status, sizeof(status), cudaMemcpyDeviceToHost));
-      rebuild = status.max_disp2_bits > static_cast<float>(trigger);
-    }
-    if (rebuild) {
-      int overflow = impl_->BuildNeighbors(true);
-      if (overflow) throw std::runtime_error("neighbor list overflowed during integration");
-    }
-    impl_->ComputeForce();
+    ResetDisplacement<<<1, 1>>>(impl_->status);
+    DispKernel<<<Grid(n), kBlock>>>(impl_->pos, impl_->xref, n, impl_->status);
+    DecideRebuild<<<1, 1>>>(impl_->status);
+    impl_->QueueRebuild();
+    ForceKernel<<<Grid(n), kBlock>>>(impl_->x, impl_->y, impl_->z, impl_->type, impl_->nn,
+                                     impl_->nl, impl_->fx, impl_->fy, impl_->fz, impl_->energy,
+                                     impl_->wxx, impl_->wyy, impl_->wzz, impl_->wxy, impl_->wxz,
+                                     impl_->wyz, n, impl_->status);
     Kick<<<Grid(n), kBlock>>>(impl_->vx, impl_->vy, impl_->vz, impl_->fx, impl_->fy, impl_->fz, n,
                               dt, inv_mass);
+    // One sync keeps the launch queue bounded. The rebuild flag stays on device.
     CheckLaunch();
+  }
+  impl_->forces_ready = true;
+  DeviceStatus finished{};
+  TILEMD_CHECK(cudaMemcpy(&finished, impl_->status, sizeof(finished), cudaMemcpyDeviceToHost));
+  if (finished.nan_detected) {
+    throw std::runtime_error("non-finite force or position during integration");
+  }
+  if (finished.overflow) {
+    throw std::runtime_error("neighbor list overflowed during integration");
   }
 }
 
