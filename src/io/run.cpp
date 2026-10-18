@@ -15,6 +15,12 @@ namespace {
 void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dynamics& state,
                 int step);
 
+double AtomMass(const SimulationInput& input, int atom) {
+  if (input.mass_by_type.empty()) return input.mass;
+  const int type = input.system.type.at(static_cast<size_t>(atom));
+  return input.mass_by_type.at(static_cast<size_t>(type));
+}
+
 ThermoRow MakeRow(const SimulationInput& input, const ref::Dynamics& state, int step,
                   double potential, const double* virial, bool metal) {
   const int n = ref::NumAtoms(input.system);
@@ -23,7 +29,7 @@ ThermoRow MakeRow(const SimulationInput& input, const ref::Dynamics& state, int 
     const double vx = state.vx[static_cast<size_t>(i)];
     const double vy = state.vy[static_cast<size_t>(i)];
     const double vz = state.vz[static_cast<size_t>(i)];
-    kinetic += 0.5 * input.mass * (vx * vx + vy * vy + vz * vz);
+    kinetic += 0.5 * AtomMass(input, i) * (vx * vx + vy * vy + vz * vz);
   }
   if (metal) kinetic *= kMetalMvv2e;
   const double dof = (n > 1) ? static_cast<double>(3 * n - 3) : static_cast<double>(3 * n);
@@ -66,35 +72,37 @@ double WrapMetal(double value, double length, int* image) {
   return value;
 }
 
-AttentionResult MetalForces(EamFuncfl& potential, const SimulationInput& input,
+template <typename Potential>
+AttentionResult MetalForces(Potential& potential, const SimulationInput& input,
                             const ref::Dynamics& state) {
   const int n = ref::NumAtoms(input.system);
   return EvaluateAttention(potential, input.system.box, state.x.data(), state.y.data(),
                            state.z.data(), input.system.type.data(), n);
 }
 
-void KickMetal(ref::Dynamics& state, const AttentionResult& force, double half) {
+void KickMetal(ref::Dynamics& state, const AttentionResult& force, const SimulationInput& input) {
   const int n = static_cast<int>(state.x.size());
+  const double scale = 0.5 * input.timestep * kMetalFtm2v;
   for (int i = 0; i < n; ++i) {
+    const double half = scale / AtomMass(input, i);
     state.vx[static_cast<size_t>(i)] += half * force.fx[static_cast<size_t>(i)];
     state.vy[static_cast<size_t>(i)] += half * force.fy[static_cast<size_t>(i)];
     state.vz[static_cast<size_t>(i)] += half * force.fz[static_cast<size_t>(i)];
   }
 }
 
-std::vector<ThermoRow> RunMetal(const SimulationInput& input, std::ofstream& dump) {
-  if (input.langevin) throw std::runtime_error("langevin is not available for an eam run");
-  EamFuncfl potential(input.eam_path);
+template <typename Potential>
+std::vector<ThermoRow> IntegrateMetal(Potential& potential, const SimulationInput& input,
+                                      std::ofstream& dump) {
   ref::System system = input.system;
   ref::Dynamics state = ref::MakeDynamics(system, input.vx, input.vy, input.vz);
-  const double half = 0.5 * input.timestep * kMetalFtm2v / input.mass;
   AttentionResult force = MetalForces(potential, input, state);
   std::vector<ThermoRow> rows;
   if (input.thermo_every > 0)
     rows.push_back(MakeRow(input, state, 0, force.potential_energy, force.virial, true));
   if (dump) WriteFrame(dump, input, state, 0);
   for (int step = 1; step <= input.steps; ++step) {
-    KickMetal(state, force, half);
+    KickMetal(state, force, input);
     const int n = ref::NumAtoms(input.system);
     for (int i = 0; i < n; ++i) {
       state.x[static_cast<size_t>(i)] = WrapMetal(
@@ -108,13 +116,25 @@ std::vector<ThermoRow> RunMetal(const SimulationInput& input, std::ofstream& dum
           input.system.box[2], &state.imgz[static_cast<size_t>(i)]);
     }
     force = MetalForces(potential, input, state);
-    KickMetal(state, force, half);
+    KickMetal(state, force, input);
     if (input.thermo_every > 0 && step % input.thermo_every == 0) {
       rows.push_back(MakeRow(input, state, step, force.potential_energy, force.virial, true));
     }
     if (dump && step % input.dump_every == 0) WriteFrame(dump, input, state, step);
   }
   return rows;
+}
+
+std::vector<ThermoRow> RunMetal(const SimulationInput& input, std::ofstream& dump) {
+  if (input.langevin) throw std::runtime_error("langevin is not available for an eam run");
+  if (input.setfl) {
+    EamSetfl potential(input.eam_path);
+    const int n = ref::NumAtoms(input.system);
+    potential.SetAtoms(input.system.type.data(), n);
+    return IntegrateMetal(potential, input, dump);
+  }
+  EamFuncfl potential(input.eam_path);
+  return IntegrateMetal(potential, input, dump);
 }
 
 void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dynamics& state,

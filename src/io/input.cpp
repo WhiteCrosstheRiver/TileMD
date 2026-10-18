@@ -1,6 +1,7 @@
 #include "io/input.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -100,6 +101,21 @@ void FillFcc(ref::System& system, int nx, int ny, int nz, double density) {
       }
     }
   }
+}
+
+bool LooksLikeSetfl(const std::string& path) {
+  std::ifstream in(path);
+  std::string line;
+  for (int i = 0; i < 4; ++i) {
+    if (!std::getline(in, line)) return false;
+  }
+  std::istringstream header(line);
+  int count = 0;
+  std::string name;
+  if (!(header >> count >> name) || count < 1) return false;
+  char* end = nullptr;
+  std::strtod(name.c_str(), &end);
+  return end == name.c_str() || *end != '\0';
 }
 
 void FillVelocities(SimulationInput& input, double temperature, std::uint32_t seed) {
@@ -264,7 +280,23 @@ SimulationInput ParseInput(const std::string& text, const std::string& base_dir)
     if (!(input.mass > 0.0)) throw std::runtime_error("mass must be positive");
     mass_set = true;
   }
-  if (input.metal && !mass_set) input.mass = EamFuncfl(input.eam_path).Mass();
+  if (input.metal && LooksLikeSetfl(input.eam_path)) {
+    if (mass_set) throw std::runtime_error("setfl masses come from the table");
+    const EamSetfl table(input.eam_path);
+    input.setfl = true;
+    input.mass_by_type.resize(static_cast<size_t>(table.NumElements()));
+    for (int element = 0; element < table.NumElements(); ++element) {
+      input.mass_by_type[static_cast<size_t>(element)] = table.Mass(element);
+    }
+    input.mass = input.mass_by_type[0];
+    for (int type : input.system.type) {
+      if (type < 0 || type >= table.NumElements()) {
+        throw std::runtime_error("atom type is outside the setfl elements");
+      }
+    }
+  } else if (input.metal && !mass_set) {
+    input.mass = EamFuncfl(input.eam_path).Mass();
+  }
 
   const int n = ref::NumAtoms(input.system);
   input.vx.assign(static_cast<size_t>(n), 0.0);

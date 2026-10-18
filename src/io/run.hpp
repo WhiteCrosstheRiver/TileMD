@@ -21,7 +21,8 @@ struct ThermoRow {
 
 // Integrates `input.steps` with velocity Verlet, or BAOAB when `langevin` is set.
 // An `eam` file uses the pair-attention potential and the metal-unit factor
-// `kMetalFtm2v`. Samples step 0 and every `thermo_every` steps. `thermo_every == 0`
+// `kMetalFtm2v`. A setfl file kicks each atom with that element's mass.
+// Samples step 0 and every `thermo_every` steps. `thermo_every == 0`
 // samples nothing. When `dump_every > 0` and `dump_path` is not empty, those steps
 // are appended as extended-XYZ frames with positions and velocities.
 std::vector<ThermoRow> RunReference(const SimulationInput& input,

@@ -435,3 +435,100 @@ TEST(Input, EamDriftSlopeMatchesLammps) {
   EXPECT_NEAR(tilemd_slope, -1.93926963e-9, 1.0e-14);
   EXPECT_NEAR(lammps_slope, tilemd_slope, 1.0e-16);
 }
+
+std::string InstalledCuNiTable() {
+  const std::filesystem::path bundled =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "CuNi.eam.alloy";
+  if (std::filesystem::exists(bundled)) return bundled.string();
+  const std::filesystem::path installed(
+      "C:/ProgramData/anaconda3/Lib/site-packages/lammps/share/lammps/potentials/CuNi.eam.alloy");
+  if (std::filesystem::exists(installed)) return installed.string();
+  return {};
+}
+
+TEST(Input, SetflRunMatchesLammpsCuNi) {
+  const std::string table = InstalledCuNiTable();
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cuni_setfl_nve_100.txt";
+  if (table.empty() || !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "CuNi setfl table is not available";
+  }
+  const double x0[4] = {10.0, 12.2, 10.4, 13.1};
+  const double y0[4] = {10.0, 10.1, 12.5, 12.0};
+  const double z0[4] = {10.0, 10.3, 10.2, 11.4};
+  const int type0[4] = {0, 1, 0, 1};
+  const double vx0[4] = {-1.2158939747208246, -0.41589397472082434, 0.3841060252791757,
+                         1.1841060252791757};
+  const double vy0[4] = {-0.75993373420051535, -0.25993373420051535, 0.24006626579948462,
+                         0.74006626579948465};
+  const double vz0[4] = {-0.29602650631979388, 0.10397349368020617, 0.50397349368020616,
+                         -0.29602650631979388};
+  const std::filesystem::path xyz =
+      std::filesystem::temp_directory_path() / "tilemd_cuni_input.extxyz";
+  {
+    std::ofstream out(xyz);
+    out.setf(std::ios::scientific);
+    out.precision(17);
+    out << "4\n";
+    out << "Lattice=\"20 0 0 0 20 0 0 0 20\" Properties=species:S:1:pos:R:3:vel:R:3:type:I:1 "
+           "shift=none pbc=\"T T T\"\n";
+    for (int i = 0; i < 4; ++i) {
+      const char species = static_cast<char>('A' + type0[i]);
+      out << species << " " << x0[i] << " " << y0[i] << " " << z0[i] << " " << vx0[i] << " "
+          << vy0[i] << " " << vz0[i] << " " << type0[i] << "\n";
+    }
+  }
+  const std::filesystem::path dump =
+      std::filesystem::temp_directory_path() / "tilemd_cuni_input.dump.extxyz";
+  std::filesystem::remove(dump);
+  const std::string text = "units metal\nstructure " + xyz.string() + "\neam " + table +
+                           "\ntimestep 0.001\nthermo_every 100\ndump_every 100\nrun 100\n";
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  EXPECT_TRUE(input.setfl);
+  EXPECT_EQ(input.mass_by_type.size(), 2u);
+  EXPECT_NEAR(input.mass, 58.689, 1.0e-9);
+  EXPECT_NEAR(input.mass_by_type[1], 63.546, 1.0e-9);
+  const std::vector<tilemd::ThermoRow> rows = tilemd::RunReference(input, dump.string());
+  ASSERT_EQ(rows.size(), 2u);
+  std::ifstream in(ref);
+  int n = 0;
+  double box[3];
+  double dt_ref = 0.0;
+  int steps_ref = 0;
+  double energy = 0.0;
+  in >> n >> box[0] >> box[1] >> box[2] >> dt_ref >> steps_ref >> energy;
+  ASSERT_EQ(n, 4);
+  ASSERT_EQ(steps_ref, 100);
+  const tilemd::ref::ExtxyzFrame later = tilemd::ref::ReadExtxyzFrame(dump.string(), 1);
+  double max_dx = 0.0;
+  double max_dv = 0.0;
+  for (int i = 0; i < n; ++i) {
+    double rx = 0.0;
+    double ry = 0.0;
+    double rz = 0.0;
+    double rvx = 0.0;
+    double rvy = 0.0;
+    double rvz = 0.0;
+    in >> rx >> ry >> rz >> rvx >> rvy >> rvz;
+    const double dx = later.system.x[static_cast<size_t>(i)] - rx -
+                      box[0] * std::rint((later.system.x[static_cast<size_t>(i)] - rx) / box[0]);
+    const double dy = later.system.y[static_cast<size_t>(i)] - ry -
+                      box[1] * std::rint((later.system.y[static_cast<size_t>(i)] - ry) / box[1]);
+    const double dz = later.system.z[static_cast<size_t>(i)] - rz -
+                      box[2] * std::rint((later.system.z[static_cast<size_t>(i)] - rz) / box[2]);
+    max_dx = std::max(max_dx, std::sqrt(dx * dx + dy * dy + dz * dz));
+    const double dvx = later.vx[static_cast<size_t>(i)] - rvx;
+    const double dvy = later.vy[static_cast<size_t>(i)] - rvy;
+    const double dvz = later.vz[static_cast<size_t>(i)] - rvz;
+    max_dv = std::max(max_dv, std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz));
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  std::cout << std::scientific << std::setprecision(8) << "input setfl nve max |dx| " << max_dx
+            << " max |dv| " << max_dv << " energy " << rows[1].potential_per_atom * 4.0
+            << " lammps " << energy << "\n";
+  EXPECT_LT(max_dx, 1.0e-8);
+  EXPECT_LT(max_dv, 1.0e-8);
+  EXPECT_NEAR(rows[1].potential_per_atom * 4.0, energy, 1.0e-6 * (1.0 + std::abs(energy)));
+  std::filesystem::remove(xyz);
+  std::filesystem::remove(dump);
+}
