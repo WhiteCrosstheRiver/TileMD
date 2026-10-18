@@ -57,7 +57,7 @@ add_executable(tilemd src/main.cu)
 target_link_libraries(tilemd PRIVATE tilemd_headers)
 tilemd_apply_cuda_flags(tilemd)
 
-add_library(tilemd_reference STATIC reference/lj_reference.cpp)
+add_library(tilemd_reference STATIC reference/lj_reference.cpp reference/tf32_pair.cpp)
 target_include_directories(tilemd_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/reference)
 target_compile_features(tilemd_reference PUBLIC cxx_std_17)
 
@@ -95,7 +95,8 @@ if(TILEMD_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp tests/unit/lj_reference_test.cpp
-                                 tests/unit/cluster_list_test.cpp tests/unit/integrator_test.cpp)
+                                 tests/unit/cluster_list_test.cpp tests/unit/integrator_test.cpp
+                                 tests/unit/tf32_pair_test.cpp)
   target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_reference
                                                  tilemd_cluster)
   file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" TILEMD_SOURCE_DIR_FWD)
