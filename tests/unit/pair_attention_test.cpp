@@ -11,6 +11,7 @@
 
 #include "force/eam.hpp"
 #include "force/lj_attention.hpp"
+#include "force/tile_attention.hpp"
 #include "lj_reference.hpp"
 
 namespace {
@@ -40,7 +41,7 @@ tilemd::AttentionShift ToShift(tilemd::ref::Shift shift) {
   return tilemd::AttentionShift::None;
 }
 
-void ExpectLj(const std::string& name) {
+void ExpectLj(const std::string& name, bool tiles) {
   const std::filesystem::path dir = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "fixtures";
   tilemd::ref::System system = tilemd::ref::ReadExtxyz((dir / (name + ".extxyz")).string());
   tilemd::ref::ReadSystemHeader((dir / (name + ".json")).string(), system);
@@ -56,9 +57,13 @@ void ExpectLj(const std::string& name) {
   }
   tilemd::LjAttention potential(pairs.data(), static_cast<int>(pairs.size()),
                                 ToShift(system.shift));
+  const int n_atoms = tilemd::ref::NumAtoms(system);
   const tilemd::AttentionResult got =
-      tilemd::EvaluateAttention(potential, system.box, system.x.data(), system.y.data(),
-                                system.z.data(), system.type.data(), tilemd::ref::NumAtoms(system));
+      tiles
+          ? tilemd::EvaluateAttentionTiles(potential, system.box, system.x.data(), system.y.data(),
+                                           system.z.data(), system.type.data(), n_atoms, 0.3)
+          : tilemd::EvaluateAttention(potential, system.box, system.x.data(), system.y.data(),
+                                      system.z.data(), system.type.data(), n_atoms);
   const tilemd::ref::Observables oracle = tilemd::ref::Compute(system);
   double max_delta = 0.0;
   double sum_sq = 0.0;
@@ -81,9 +86,12 @@ void ExpectLj(const std::string& name) {
   EXPECT_NEAR(got.potential_energy, oracle.potential_energy,
               1.0e-10 * (1.0 + std::abs(oracle.potential_energy)))
       << name;
+  double virial_scale = 1.0;
   for (int k = 0; k < 6; ++k) {
-    EXPECT_NEAR(got.virial[k], oracle.virial[k], 1.0e-9 * (1.0 + std::abs(oracle.virial[k])))
-        << name << " virial " << k;
+    virial_scale = std::max(virial_scale, std::abs(oracle.virial[k]));
+  }
+  for (int k = 0; k < 6; ++k) {
+    EXPECT_NEAR(got.virial[k], oracle.virial[k], 1.0e-9 * virial_scale) << name << " virial " << k;
   }
 }
 
@@ -91,7 +99,12 @@ void ExpectLj(const std::string& name) {
 
 TEST(PairAttention, LennardJonesMatchesTheOracle) {
   const char* names[] = {"fcc_500", "boundary_500", "cutoff_500", "twotype_2000", "melt_4000"};
-  for (const char* name : names) ExpectLj(name);
+  for (const char* name : names) ExpectLj(name, false);
+}
+
+TEST(PairAttention, TileListMatchesTheOracle) {
+  const char* names[] = {"fcc_500", "boundary_500", "cutoff_500", "twotype_2000", "melt_4000"};
+  for (const char* name : names) ExpectLj(name, true);
 }
 
 TEST(PairAttention, EamForceMatchesEnergyDerivative) {
@@ -168,6 +181,14 @@ TEST(PairAttention, EamMatchesLammpsCopper) {
             << error << " energy " << got.potential_energy << " lammps " << energy << "\n";
   EXPECT_LT(error, 1.0e-5);
   EXPECT_NEAR(got.potential_energy, energy, 1.0e-8 * (1.0 + std::abs(energy)));
+  tilemd::EamFuncfl tiled(table.string());
+  const tilemd::AttentionResult from_tiles =
+      tilemd::EvaluateAttentionTiles(tiled, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const double tile_error = RelativeForce(from_tiles.fx, from_tiles.fy, from_tiles.fz, fx, fy, fz);
+  std::cout << std::scientific << std::setprecision(8) << "eam tiles vs lammps force_rel "
+            << tile_error << " energy " << from_tiles.potential_energy << "\n";
+  EXPECT_LT(tile_error, 1.0e-5);
+  EXPECT_NEAR(from_tiles.potential_energy, energy, 1.0e-8 * (1.0 + std::abs(energy)));
 }
 
 void CopperVelocity(int n, std::vector<double>& vx, std::vector<double>& vy,

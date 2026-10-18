@@ -25,3 +25,4 @@
 - M7 compact-cell remeasure of that score. A cell of about 4 atoms lowers the melt force error from 7.9e-5 to 1.9e-5, which is still outside the tolerance.
 - M8 CPU pair-attention API. Lennard-Jones matches the double-precision oracle. A two-pass EAM funcfl evaluation matches LAMMPS `pair_style eam` on displaced fcc copper, including 100 steps of metal-unit velocity Verlet.
 - M8 device Lennard-Jones attention kernel. It compiles and has not been launched while the 32k validation occupies the GPU.
+- M8 pair-attention passes on the cluster-pair list. Lennard-Jones matches the oracle, and the copper EAM tile walk matches LAMMPS to `1.6e-13`.
