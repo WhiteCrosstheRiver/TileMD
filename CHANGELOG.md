@@ -4,7 +4,7 @@
 
 ### Added
 - M0 repository skeleton: CMake CUDA project, CPU and GPU smoke tests, CI, and benchmark environment recorder.
-- Key-value input parser for the Appendix D sketch. An fcc melt gets zero-momentum Gaussian velocities. `tilemd input.in` runs that file on the CPU reference, writes thermo to stdout, and appends extended-XYZ frames when `dump_every` is set. Those frames reload through `Properties`, including the velocity column. `units metal` and `eam` run a funcfl table with the metal-unit velocity Verlet. A 10^5-step copper NVE drift matches the LAMMPS energy slope, `-1.94e-9` eV/atom/ps.
+- Key-value input parser for the Appendix D sketch. An fcc melt gets zero-momentum Gaussian velocities. `tilemd input.in` runs that file on the CPU reference, writes thermo to stdout, and appends extended-XYZ frames when `dump_every` is set. Those frames reload through `Properties`, including the velocity column. `units metal` and `eam` run a funcfl table with the metal-unit velocity Verlet. A 10^5-step copper NVE drift matches the LAMMPS energy slope, `-1.94e-9` eV/atom/ps. A setfl reader matches LAMMPS `eam/alloy` on a four-atom Cu-Ni cell to `1.5e-15` relative force.
 - M2 double-precision LJ reference, seven fixtures, and a LAMMPS force comparison for `melt_4000`.
 - M3 thread-per-atom neighbor list, LJ force, and velocity Verlet on the GPU.
 - M3 32k NVE comparison against CPU LAMMPS, plus drift and RDF drivers for the remaining G1 runs.

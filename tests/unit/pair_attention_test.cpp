@@ -645,3 +645,60 @@ TEST(PairAttention, EamTileNveMatchesLammpsFor100Steps) {
   EXPECT_LT(max_dv, 1.0e-8);
   EXPECT_NEAR(final_force.potential_energy, energy, 1.0e-6 * (1.0 + std::abs(energy)));
 }
+
+std::string CuNiPotential() {
+  const std::filesystem::path bundled =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "CuNi.eam.alloy";
+  if (std::filesystem::exists(bundled)) return bundled.string();
+  const std::filesystem::path installed(
+      "C:/ProgramData/anaconda3/Lib/site-packages/lammps/share/lammps/potentials/CuNi.eam.alloy");
+  if (std::filesystem::exists(installed)) return installed.string();
+  return {};
+}
+
+TEST(PairAttention, SetflCuNiMatchesLammps) {
+  const std::string table = CuNiPotential();
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cuni_setfl_4.txt";
+  if (table.empty() || !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "CuNi setfl table is not available";
+  }
+  std::ifstream in(ref);
+  int n = 0;
+  double box[3];
+  double energy = 0.0;
+  in >> n >> box[0] >> box[1] >> box[2] >> energy;
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  std::vector<int> type(static_cast<size_t>(n));
+  std::vector<double> fx(static_cast<size_t>(n));
+  std::vector<double> fy(static_cast<size_t>(n));
+  std::vector<double> fz(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    in >> type[static_cast<size_t>(i)] >> x[static_cast<size_t>(i)] >> y[static_cast<size_t>(i)] >>
+        z[static_cast<size_t>(i)] >> fx[static_cast<size_t>(i)] >> fy[static_cast<size_t>(i)] >>
+        fz[static_cast<size_t>(i)];
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  tilemd::EamSetfl potential(table);
+  EXPECT_EQ(potential.NumElements(), 2);
+  EXPECT_EQ(potential.Element(0), "Ni");
+  EXPECT_EQ(potential.Element(1), "Cu");
+  EXPECT_NEAR(potential.Mass(0), 58.689, 1.0e-6);
+  potential.SetAtoms(type.data(), n);
+  const tilemd::AttentionResult got =
+      tilemd::EvaluateAttention(potential, box, x.data(), y.data(), z.data(), type.data(), n);
+  const double error = RelativeForce(got.fx, got.fy, got.fz, fx, fy, fz);
+  std::cout << std::scientific << std::setprecision(8) << "setfl vs lammps force_rel " << error
+            << " energy " << got.potential_energy << " lammps " << energy << "\n";
+  EXPECT_LT(error, 1.0e-5);
+  EXPECT_NEAR(got.potential_energy, energy, 1.0e-8 * (1.0 + std::abs(energy)));
+  tilemd::EamSetfl tiled(table);
+  tiled.SetAtoms(type.data(), n);
+  const tilemd::AttentionResult from_tiles =
+      tilemd::EvaluateAttentionTiles(tiled, box, x.data(), y.data(), z.data(), type.data(), n, 0.3);
+  const double tile_error = RelativeForce(from_tiles.fx, from_tiles.fy, from_tiles.fz, fx, fy, fz);
+  EXPECT_LT(tile_error, 1.0e-5);
+  EXPECT_NEAR(from_tiles.potential_energy, energy, 1.0e-8 * (1.0 + std::abs(energy)));
+}
