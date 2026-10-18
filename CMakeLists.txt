@@ -76,6 +76,7 @@ target_link_libraries(tilemd_io PUBLIC tilemd_eam)
 add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp)
 target_link_libraries(tilemd_cluster PUBLIC tilemd_headers)
 target_compile_features(tilemd_cluster PUBLIC cxx_std_17)
+target_link_libraries(tilemd_io PUBLIC tilemd_cluster)
 
 add_library(tilemd_attention STATIC src/force/lj_attention.cu)
 target_link_libraries(tilemd_attention PUBLIC tilemd_headers tilemd_cluster)

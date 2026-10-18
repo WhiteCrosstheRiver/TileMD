@@ -8,6 +8,7 @@
 #include <string>
 
 #include "force/eam.hpp"
+#include "force/tile_attention.hpp"
 
 namespace tilemd {
 namespace {
@@ -76,8 +77,8 @@ template <typename Potential>
 AttentionResult MetalForces(Potential& potential, const SimulationInput& input,
                             const ref::Dynamics& state) {
   const int n = ref::NumAtoms(input.system);
-  return EvaluateAttention(potential, input.system.box, state.x.data(), state.y.data(),
-                           state.z.data(), input.system.type.data(), n);
+  return EvaluateAttentionTiles(potential, input.system.box, state.x.data(), state.y.data(),
+                                state.z.data(), input.system.type.data(), n, input.skin);
 }
 
 void KickMetal(ref::Dynamics& state, const AttentionResult& force, const SimulationInput& input) {
