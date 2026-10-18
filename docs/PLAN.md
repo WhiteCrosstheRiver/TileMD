@@ -13,7 +13,7 @@
 | M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. GitHub remote not created (`gh` is not installed). |
 | M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | not started | — | | |
 | M2 CPU reference oracle | `m2-cpu-reference` | in progress | G1-ref | | Local gate passed (LAMMPS 22 Jul 2025 Update 4, CPU). No GitHub PR (`gh` is not installed). |
-| M3 GPU v0 (correct, simple) | `m3-gpu-v0` | in progress | G1 | | Local T1, T2, T3, T6, T7, and T8 passed on an RTX 3050 against CPU LAMMPS. T4 and T5 are not run. No KOKKOS package and no GitHub PR (`gh` is not installed). |
+| M3 GPU v0 (correct, simple) | `m3-gpu-v0` | in progress | G1 | | Local T1, T2, T3, T5, T6, T7, and T8 passed on an RTX 3050 against CPU LAMMPS. T5 L1 is 0.00147. T4 is still running. No KOKKOS package and no GitHub PR (`gh` is not installed). |
 | M4 Performance foundation | `m4-perf-foundation` | in progress | G2, G3 | | Spatial sort, device rebuild, a 50-step graph, conditional rebuild, device thermo, and launch-bounds/`__ldg` are in. The block-size sweep and GPU tests wait until this GPU is free. |
 | M5 Cluster-pair tiles (SIMT) | `m5-cluster-tiles` | in progress | G2+ | | CPU list and tile force match the oracle on the fixtures, including `melt_4000`. The GPU warp tile kernel is selectable and has not been launched here. Tile efficiency is 0.102 at 4k and 0.0916 at 32k. Targets of 64, 128, and 256 atoms per column stay near 0.10 and still miss 40–60%. |
 | M6 Fused single-kernel timestep | `m6-fused-step` | in progress | G2+, G3+ | | CPU leapfrog matches velocity Verlet to round-off over 100 steps. Loading pair coordinates from `pos4` misses T1 on `melt_4000` (`5.81e-5`). The GPU fused kernel has not been launched. |

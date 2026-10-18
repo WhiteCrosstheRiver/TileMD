@@ -7,6 +7,7 @@
 - M2 double-precision LJ reference, seven fixtures, and a LAMMPS force comparison for `melt_4000`.
 - M3 thread-per-atom neighbor list, LJ force, and velocity Verlet on the GPU.
 - M3 32k NVE comparison against CPU LAMMPS, plus drift and RDF drivers for the remaining G1 runs.
+- M3 RDF on the 32k melt. The L1 distance to LAMMPS g(r) is 0.00147, inside the 0.02 gate. The 10^6-step drift comparison is still running.
 - M4 stable Morton reorder at each neighbor rebuild, with output still in the original atom order.
 - M4 device-side rebuild decision. The step loop no longer copies status back on every step.
 - M4 CUDA graph of 50 steps, with a segment snapshot that restores and grows the list on overflow.
