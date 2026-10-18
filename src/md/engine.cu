@@ -702,7 +702,7 @@ struct Engine::Impl {
   int BuildNeighbors(bool grow);
   void ComputeForce();
   GpuForces TileForces();
-  void FusedTileStep(float4* pos_out);
+  void FusedTileStep(float4* pos_cur, float4* pos_out);
   void RunClusterTiles(int steps);
   GpuForces DownloadForces(int overflow);
 
@@ -1353,7 +1353,7 @@ GpuForces Engine::Impl::TileForces() {
   return out;
 }
 
-void Engine::Impl::FusedTileStep(float4* pos_out) {
+void Engine::Impl::FusedTileStep(float4* pos_cur, float4* pos_out) {
   std::vector<double> hx(static_cast<size_t>(n));
   std::vector<double> hy(static_cast<size_t>(n));
   std::vector<double> hz(static_cast<size_t>(n));
@@ -1384,8 +1384,8 @@ void Engine::Impl::FusedTileStep(float4* pos_out) {
                                             htype.data(), n, max_cut + system.skin);
   const ClusterPairs list = BuildClusterPairs(grid);
   RunFusedTileLeapfrog(grid, list, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift, x, y,
-                       z, vx, vy, vz, imgx, imgy, imgz, pos_out, xref, status, step_counter,
-                       system.dt, 1.0 / system.mass);
+                       z, vx, vy, vz, imgx, imgy, imgz, pos_cur, pos_out, xref, status,
+                       step_counter, system.dt, 1.0 / system.mass);
   forces_ready = false;
 }
 
@@ -1408,7 +1408,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
   float4* latest = pos;
   float4* other = pos_next;
   for (int step = 0; step < steps; ++step) {
-    FusedTileStep(other);
+    FusedTileStep(latest, other);
     std::swap(latest, other);
   }
   if (latest != pos) std::swap(pos, pos_next);

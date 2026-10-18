@@ -82,8 +82,8 @@ __device__ float MinImageTile(float delta, float length) {
   return delta - length * rintf(delta / length);
 }
 
-// The cluster snapshot supplies neighbor coordinates. Only the lane that owns
-// an atom writes that atom's position and velocity.
+// Pair geometry for the fused step is read from pos_cur. Only the lane that
+// owns an atom writes that atom's double position and velocity, and pos_next.
 struct TileIntegrate {
   double* x = nullptr;
   double* y = nullptr;
@@ -94,6 +94,7 @@ struct TileIntegrate {
   int* imgx = nullptr;
   int* imgy = nullptr;
   int* imgz = nullptr;
+  float4* pos_cur = nullptr;
   float4* pos_next = nullptr;
   float4* xref = nullptr;
   DeviceStatus* status = nullptr;
@@ -117,9 +118,23 @@ __global__ void __launch_bounds__(32)
 
   const int slot_i = ci * 8 + i_local;
   const int ti = type[slot_i];
-  const double xi = x[slot_i];
-  const double yi = y[slot_i];
-  const double zi = z[slot_i];
+  const int gi = gid[slot_i];
+  double xi = 0.0;
+  double yi = 0.0;
+  double zi = 0.0;
+  if constexpr (kIntegrate) {
+    if (ti != kMaskType && gi >= 0) {
+      const float4 self = integrate.pos_cur[gi];
+      xi = static_cast<double>(self.x);
+      yi = static_cast<double>(self.y);
+      zi = static_cast<double>(self.z);
+    }
+  } else {
+    (void)gi;
+    xi = x[slot_i];
+    yi = y[slot_i];
+    zi = z[slot_i];
+  }
   double ax = 0.0;
   double ay = 0.0;
   double az = 0.0;
@@ -142,10 +157,26 @@ __global__ void __launch_bounds__(32)
     int sz = 0;
     if (active) DecodeTileShift(shift[pair], &sx, &sy, &sz);
     const int slot_j = other * 8 + i_local;
-    const double xj = active ? x[slot_j] + static_cast<double>(sx) * c_tile_box[0] : 0.0;
-    const double yj = active ? y[slot_j] + static_cast<double>(sy) * c_tile_box[1] : 0.0;
-    const double zj = active ? z[slot_j] + static_cast<double>(sz) * c_tile_box[2] : 0.0;
     const int tj = active ? type[slot_j] : kMaskType;
+    const int gj = active ? gid[slot_j] : -1;
+    double xj = 0.0;
+    double yj = 0.0;
+    double zj = 0.0;
+    if (active && tj != kMaskType) {
+      if constexpr (kIntegrate) {
+        if (gj >= 0) {
+          const float4 other_pos = integrate.pos_cur[gj];
+          xj = static_cast<double>(other_pos.x) + static_cast<double>(sx) * c_tile_box[0];
+          yj = static_cast<double>(other_pos.y) + static_cast<double>(sy) * c_tile_box[1];
+          zj = static_cast<double>(other_pos.z) + static_cast<double>(sz) * c_tile_box[2];
+        }
+      } else {
+        (void)gj;
+        xj = x[slot_j] + static_cast<double>(sx) * c_tile_box[0];
+        yj = y[slot_j] + static_cast<double>(sy) * c_tile_box[1];
+        zj = z[slot_j] + static_cast<double>(sz) * c_tile_box[2];
+      }
+    }
 
     for (int atom = 0; atom < 8; ++atom) {
       const int source = atom + 8 * j_sub;
@@ -405,8 +436,8 @@ TileDeviceForces RunTileForceGpu(const ClusterGrid& grid, const ClusterPairs& li
 void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, const LjPair* pairs,
                           int npair, LjShift shift, double* atom_x, double* atom_y, double* atom_z,
                           double* vx, double* vy, double* vz, int* imgx, int* imgy, int* imgz,
-                          float4* pos_next, float4* xref, void* status, int* step_counter,
-                          double dt, double inv_mass) {
+                          float4* pos_cur, float4* pos_next, float4* xref, void* status,
+                          int* step_counter, double dt, double inv_mass) {
   if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
   if (!(dt > 0.0) || !(inv_mass > 0.0)) {
     throw std::invalid_argument("dt and inverse mass must be positive");
@@ -480,6 +511,7 @@ void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, con
   step.imgx = imgx;
   step.imgy = imgy;
   step.imgz = imgz;
+  step.pos_cur = pos_cur;
   step.pos_next = pos_next;
   step.xref = xref;
   step.status = static_cast<DeviceStatus*>(status);
