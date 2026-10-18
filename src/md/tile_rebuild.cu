@@ -146,58 +146,26 @@ __global__ void CountTilePairs(const int* column_cluster, const int* column_nclu
   const int ci = blockIdx.x * blockDim.x + threadIdx.x;
   const int ncluster = *live;
   if (ci >= ncluster) return;
-  const int column = cluster_column[ci];
-  const int ix = column % nx;
-  const int iy = column / nx;
-  if (lo_x[ci] > hi_x[ci]) {
-    pair_count[ci] = 0;
-    return;
-  }
-  const int radius_x = min(nx, static_cast<int>(ceil(reach / edge_x)));
-  const int radius_y = min(ny, static_cast<int>(ceil(reach / edge_y)));
-  const double reach2 = reach * reach;
+  ClusterPairView view;
+  view.lo_x = lo_x;
+  view.lo_y = lo_y;
+  view.lo_z = lo_z;
+  view.hi_x = hi_x;
+  view.hi_y = hi_y;
+  view.hi_z = hi_z;
+  view.column_cluster = column_cluster;
+  view.column_ncluster = column_ncluster;
+  view.cluster_column = cluster_column;
+  view.nx = nx;
+  view.ny = ny;
+  view.reach = reach;
+  view.edge_x = edge_x;
+  view.edge_y = edge_y;
+  view.box_x = box_x;
+  view.box_y = box_y;
+  view.box_z = box_z;
   int kept = 0;
-  for (int dy = -radius_y; dy <= radius_y; ++dy) {
-    for (int dx = -radius_x; dx <= radius_x; ++dx) {
-      int jx = ix + dx;
-      int sx = 0;
-      if (jx >= nx) {
-        jx -= nx;
-        sx = 1;
-      } else if (jx < 0) {
-        jx += nx;
-        sx = -1;
-      }
-      int jy = iy + dy;
-      int sy = 0;
-      if (jy >= ny) {
-        jy -= ny;
-        sy = 1;
-      } else if (jy < 0) {
-        jy += ny;
-        sy = -1;
-      }
-      const int jcolumn = jx + nx * jy;
-      const int j_begin = column_cluster[jcolumn];
-      const int j_count = column_ncluster[jcolumn];
-      for (int local_j = 0; local_j < j_count; ++local_j) {
-        const int cj = j_begin + local_j;
-        if (lo_x[cj] > hi_x[cj]) continue;
-        for (int sz = -1; sz <= 1; ++sz) {
-          const double j_lo_z = lo_z[cj] + sz * box_z;
-          const double j_hi_z = hi_z[cj] + sz * box_z;
-          if (hi_z[ci] + reach < j_lo_z) continue;
-          if (j_hi_z + reach < lo_z[ci]) continue;
-          const double gap_x =
-              AxisGap(lo_x[ci], hi_x[ci], lo_x[cj] + sx * box_x, hi_x[cj] + sx * box_x);
-          const double gap_y =
-              AxisGap(lo_y[ci], hi_y[ci], lo_y[cj] + sy * box_y, hi_y[cj] + sy * box_y);
-          const double gap_z = AxisGap(lo_z[ci], hi_z[ci], j_lo_z, j_hi_z);
-          if (gap_x * gap_x + gap_y * gap_y + gap_z * gap_z < reach2) ++kept;
-        }
-      }
-    }
-  }
+  VisitClusterPairs(view, ci, [&](int, int) { ++kept; }, nullptr);
   pair_count[ci] = kept;
 }
 
@@ -235,59 +203,33 @@ __global__ void FillTilePairs(const int* column_cluster, const int* column_nclus
   const int ci = blockIdx.x * blockDim.x + threadIdx.x;
   const int ncluster = *live;
   if (ci >= ncluster) return;
-  if (lo_x[ci] > hi_x[ci]) return;
-  const int column = cluster_column[ci];
-  const int ix = column % nx;
-  const int iy = column / nx;
-  const int radius_x = min(nx, static_cast<int>(ceil(reach / edge_x)));
-  const int radius_y = min(ny, static_cast<int>(ceil(reach / edge_y)));
-  const double reach2 = reach * reach;
+  ClusterPairView view;
+  view.lo_x = lo_x;
+  view.lo_y = lo_y;
+  view.lo_z = lo_z;
+  view.hi_x = hi_x;
+  view.hi_y = hi_y;
+  view.hi_z = hi_z;
+  view.column_cluster = column_cluster;
+  view.column_ncluster = column_ncluster;
+  view.cluster_column = cluster_column;
+  view.nx = nx;
+  view.ny = ny;
+  view.reach = reach;
+  view.edge_x = edge_x;
+  view.edge_y = edge_y;
+  view.box_x = box_x;
+  view.box_y = box_y;
+  view.box_z = box_z;
   int cursor = ci_start[ci];
-  for (int dy = -radius_y; dy <= radius_y; ++dy) {
-    for (int dx = -radius_x; dx <= radius_x; ++dx) {
-      int jx = ix + dx;
-      int sx = 0;
-      if (jx >= nx) {
-        jx -= nx;
-        sx = 1;
-      } else if (jx < 0) {
-        jx += nx;
-        sx = -1;
-      }
-      int jy = iy + dy;
-      int sy = 0;
-      if (jy >= ny) {
-        jy -= ny;
-        sy = 1;
-      } else if (jy < 0) {
-        jy += ny;
-        sy = -1;
-      }
-      const int jcolumn = jx + nx * jy;
-      const int j_begin = column_cluster[jcolumn];
-      const int j_count = column_ncluster[jcolumn];
-      for (int local_j = 0; local_j < j_count; ++local_j) {
-        const int cj = j_begin + local_j;
-        if (lo_x[cj] > hi_x[cj]) continue;
-        for (int sz = -1; sz <= 1; ++sz) {
-          const double j_lo_z = lo_z[cj] + sz * box_z;
-          const double j_hi_z = hi_z[cj] + sz * box_z;
-          if (hi_z[ci] + reach < j_lo_z) continue;
-          if (j_hi_z + reach < lo_z[ci]) continue;
-          const double gap_x =
-              AxisGap(lo_x[ci], hi_x[ci], lo_x[cj] + sx * box_x, hi_x[cj] + sx * box_x);
-          const double gap_y =
-              AxisGap(lo_y[ci], hi_y[ci], lo_y[cj] + sy * box_y, hi_y[cj] + sy * box_y);
-          const double gap_z = AxisGap(lo_z[ci], hi_z[ci], j_lo_z, j_hi_z);
-          if (gap_x * gap_x + gap_y * gap_y + gap_z * gap_z < reach2) {
-            cj_out[cursor] = cj;
-            shift_out[cursor] = ShiftIndex(sx, sy, sz);
-            ++cursor;
-          }
-        }
-      }
-    }
-  }
+  VisitClusterPairs(
+      view, ci,
+      [&](int cj, int shift) {
+        cj_out[cursor] = cj;
+        shift_out[cursor] = shift;
+        ++cursor;
+      },
+      nullptr);
 }
 
 __global__ void PublishTileXref(float4* xref, const float4* pos, int n, DeviceStatus* status) {
