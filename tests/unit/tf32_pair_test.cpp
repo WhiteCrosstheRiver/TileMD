@@ -382,3 +382,175 @@ TEST(Tf32Pair, FixturesStayInsideTheForceTolerance) {
   EXPECT_EQ(present, 7);
   std::cout << "worst fixture force rel " << worst_force << "\n";
 }
+
+void CompactOrigin(const tilemd::ref::System& system, int target, std::vector<double>& ox,
+                   std::vector<double>& oy, std::vector<double>& oz, int* max_occ) {
+  const int n = tilemd::ref::NumAtoms(system);
+  const double volume = system.box[0] * system.box[1] * system.box[2];
+  const double edge = std::cbrt(static_cast<double>(target) * volume / static_cast<double>(n));
+  const int nx = std::max(1, static_cast<int>(std::lround(system.box[0] / edge)));
+  const int ny = std::max(1, static_cast<int>(std::lround(system.box[1] / edge)));
+  const int nz = std::max(1, static_cast<int>(std::lround(system.box[2] / edge)));
+  const double ex = system.box[0] / static_cast<double>(nx);
+  const double ey = system.box[1] / static_cast<double>(ny);
+  const double ez = system.box[2] / static_cast<double>(nz);
+  auto cell = [&](double x, double y, double z) {
+    int ix = static_cast<int>(std::floor(x / ex));
+    int iy = static_cast<int>(std::floor(y / ey));
+    int iz = static_cast<int>(std::floor(z / ez));
+    if (ix < 0) ix = 0;
+    if (iy < 0) iy = 0;
+    if (iz < 0) iz = 0;
+    if (ix >= nx) ix = nx - 1;
+    if (iy >= ny) iy = ny - 1;
+    if (iz >= nz) iz = nz - 1;
+    return ix + nx * (iy + ny * iz);
+  };
+  const int ncell = nx * ny * nz;
+  std::vector<int> count(static_cast<size_t>(ncell));
+  std::vector<int> head(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    const int c = cell(system.x[static_cast<size_t>(i)], system.y[static_cast<size_t>(i)],
+                       system.z[static_cast<size_t>(i)]);
+    head[static_cast<size_t>(i)] = c;
+    ++count[static_cast<size_t>(c)];
+  }
+  *max_occ = 0;
+  for (int c : count) *max_occ = std::max(*max_occ, c);
+  ox.assign(static_cast<size_t>(n), 0.0);
+  oy.assign(static_cast<size_t>(n), 0.0);
+  oz.assign(static_cast<size_t>(n), 0.0);
+  for (int c = 0; c < ncell; ++c) {
+    if (count[static_cast<size_t>(c)] == 0) continue;
+    double ax = 0.0;
+    double ay = 0.0;
+    double az = 0.0;
+    bool anchored = false;
+    double mx = 0.0;
+    double my = 0.0;
+    double mz = 0.0;
+    for (int i = 0; i < n; ++i) {
+      if (head[static_cast<size_t>(i)] != c) continue;
+      if (!anchored) {
+        ax = system.x[static_cast<size_t>(i)];
+        ay = system.y[static_cast<size_t>(i)];
+        az = system.z[static_cast<size_t>(i)];
+        anchored = true;
+      }
+      mx += tilemd::ref::MinImage(system.x[static_cast<size_t>(i)] - ax, system.box[0]);
+      my += tilemd::ref::MinImage(system.y[static_cast<size_t>(i)] - ay, system.box[1]);
+      mz += tilemd::ref::MinImage(system.z[static_cast<size_t>(i)] - az, system.box[2]);
+    }
+    const double inv = 1.0 / static_cast<double>(count[static_cast<size_t>(c)]);
+    mx *= inv;
+    my *= inv;
+    mz *= inv;
+    for (int i = 0; i < n; ++i) {
+      if (head[static_cast<size_t>(i)] != c) continue;
+      ox[static_cast<size_t>(i)] = ax + mx;
+      oy[static_cast<size_t>(i)] = ay + my;
+      oz[static_cast<size_t>(i)] = az + mz;
+    }
+  }
+}
+
+TEST(Tf32Pair, CompactCellsOnTheMelt) {
+  const std::filesystem::path dir = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "fixtures";
+  const char* names[] = {"cutoff_500", "melt_4000"};
+  for (const char* name : names) {
+    tilemd::ref::System system =
+        tilemd::ref::ReadExtxyz((dir / (std::string(name) + ".extxyz")).string());
+    tilemd::ref::ReadSystemHeader((dir / (std::string(name) + ".json")).string(), system);
+    const int n = tilemd::ref::NumAtoms(system);
+    PreparedPair row;
+    row.defined = true;
+    row.rc = system.pairs[0].cutoff;
+    row.rc2 = row.rc * row.rc;
+    row.sigma2 = system.pairs[0].sigma * system.pairs[0].sigma;
+    row.eps24 = 24.0 * system.pairs[0].epsilon;
+    const double inv_rc2 = 1.0 / row.rc2;
+    const double sr2 = row.sigma2 * inv_rc2;
+    const double sr6 = sr2 * sr2 * sr2;
+    row.s_rc = row.eps24 * inv_rc2 * sr6 * (2.0 * sr6 - 1.0);
+    std::vector<double> ox;
+    std::vector<double> oy;
+    std::vector<double> oz;
+    int max_occ = 0;
+    const int targets[] = {4, 8, 16};
+    for (int target : targets) {
+      CompactOrigin(system, target, ox, oy, oz, &max_occ);
+      std::vector<double> fx(static_cast<size_t>(n));
+      std::vector<double> fy(static_cast<size_t>(n));
+      std::vector<double> fz(static_cast<size_t>(n));
+      double max_cancel = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const double xi = system.x[static_cast<size_t>(i)];
+        const double yi = system.y[static_cast<size_t>(i)];
+        const double zi = system.z[static_cast<size_t>(i)];
+        const double irel_x = tilemd::ref::MinImage(xi - ox[static_cast<size_t>(i)], system.box[0]);
+        const double irel_y = tilemd::ref::MinImage(yi - oy[static_cast<size_t>(i)], system.box[1]);
+        const double irel_z = tilemd::ref::MinImage(zi - oz[static_cast<size_t>(i)], system.box[2]);
+        for (int j = 0; j < n; ++j) {
+          if (i == j) continue;
+          const double dx =
+              tilemd::ref::MinImage(xi - system.x[static_cast<size_t>(j)], system.box[0]);
+          const double dy =
+              tilemd::ref::MinImage(yi - system.y[static_cast<size_t>(j)], system.box[1]);
+          const double dz =
+              tilemd::ref::MinImage(zi - system.z[static_cast<size_t>(j)], system.box[2]);
+          const double truth = dx * dx + dy * dy + dz * dz;
+          if (!(truth < row.rc2)) continue;
+          const float rix = static_cast<float>(irel_x);
+          const float riy = static_cast<float>(irel_y);
+          const float riz = static_cast<float>(irel_z);
+          const double r_tile2 = static_cast<double>(rix) * rix + static_cast<double>(riy) * riy +
+                                 static_cast<double>(riz) * riz;
+          max_cancel = std::max(max_cancel, r_tile2 / truth);
+          float a[8];
+          float b[8];
+          tilemd::numerics::PackScoreA(rix, riy, riz, a);
+          tilemd::numerics::PackScoreB(static_cast<float>(irel_x - dx),
+                                       static_cast<float>(irel_y - dy),
+                                       static_cast<float>(irel_z - dz), b);
+          const double r2 = static_cast<double>(tilemd::numerics::Dot3Tf32(a, b));
+          if (!(r2 > 0.0) || !(r2 < row.rc2)) continue;
+          const double inv_r2 = 1.0 / r2;
+          const double sr2_pair = row.sigma2 * inv_r2;
+          const double sr6_pair = sr2_pair * sr2_pair * sr2_pair;
+          double s = row.eps24 * inv_r2 * sr6_pair * (2.0 * sr6_pair - 1.0);
+          if (system.shift == tilemd::ref::Shift::Force) s -= row.s_rc * row.rc / std::sqrt(r2);
+          fx[static_cast<size_t>(i)] += s * dx;
+          fy[static_cast<size_t>(i)] += s * dy;
+          fz[static_cast<size_t>(i)] += s * dz;
+        }
+      }
+      const tilemd::ref::Observables oracle = tilemd::ref::Compute(system);
+      double max_delta = 0.0;
+      double sum_sq = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const double ex = fx[static_cast<size_t>(i)] - oracle.fx[static_cast<size_t>(i)];
+        const double ey = fy[static_cast<size_t>(i)] - oracle.fy[static_cast<size_t>(i)];
+        const double ez = fz[static_cast<size_t>(i)] - oracle.fz[static_cast<size_t>(i)];
+        max_delta = std::max(max_delta, std::sqrt(ex * ex + ey * ey + ez * ez));
+        sum_sq += oracle.fx[static_cast<size_t>(i)] * oracle.fx[static_cast<size_t>(i)] +
+                  oracle.fy[static_cast<size_t>(i)] * oracle.fy[static_cast<size_t>(i)] +
+                  oracle.fz[static_cast<size_t>(i)] * oracle.fz[static_cast<size_t>(i)];
+      }
+      const double rms = std::sqrt(sum_sq / static_cast<double>(n));
+      const double force_rel = max_delta / std::max(rms, 1.0e-30);
+      std::cout << "compact " << name << " target " << target << " max_occ " << max_occ
+                << " cancel " << max_cancel << " force_max " << max_delta << " rms " << rms
+                << " force_rel " << force_rel << "\n";
+      EXPECT_LT(max_cancel, 40.0) << name << " target " << target;
+      if (std::string(name) == "cutoff_500") {
+        EXPECT_LT(force_rel, 1.0e-5) << name << " target " << target;
+      } else if (target == 4) {
+        EXPECT_GT(force_rel, 1.0e-5) << name;
+        EXPECT_LT(force_rel, 3.0e-5) << name;
+      } else if (target == 16) {
+        EXPECT_GT(force_rel, 2.0e-5) << name;
+        EXPECT_LT(force_rel, 6.0e-5) << name;
+      }
+    }
+  }
+}

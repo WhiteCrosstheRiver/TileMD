@@ -55,6 +55,20 @@ The seven fixtures use the centroid of each atom's current 8-atom z-slice as the
 
 On every fixture the separated-pair 3×TF32 distance beats plain TF32 by two to four orders of magnitude. The melt force error, `7.9e-5`, is outside T1. The boundary, dense, two-type, and dilute fixtures are worse because a few very small `d` make `s(D)` singular: a `1e-5` absolute error in `d^2` is a large relative error, and the 8-atom slice does not bring both atoms near the origin. `fcc_500` has a cancelling reference force, so the relative ratio is not meaningful; the absolute residual is `1.1e-5`.
 
+## Compact cells
+
+The z-slice is a bad tile, so the same force loop was repeated with a cubic cell whose volume holds about 4, 8, or 16 atoms. The origin of every atom in a cell is that cell's centroid. The force direction is still the true minimum-image vector.
+
+| fixture | target atoms | max occupancy | `(|r|/d)^2` | force relative error |
+|---|---:|---:|---:|---:|
+| cutoff_500 | 4 | 12 | 8.4 | 3.7e-6 |
+| cutoff_500 | 16 | 16 | 9.5 | 3.2e-6 |
+| melt_4000 | 4 | 8 | 2.2 | 1.9e-5 |
+| melt_4000 | 8 | 13 | 3.0 | 3.2e-5 |
+| melt_4000 | 16 | 24 | 5.3 | 3.9e-5 |
+
+Shrinking the tile moves the melt from `7.9e-5` to `1.9e-5`. That is still outside T1. `cutoff_500` does fall inside `1e-5` once the origin is a compact cell. The melt keeps pairs closer than the spacing-1.2 cloud, and `s(D)` turns a small error in `D` into a force error that a shorter tile does not remove.
+
 ## Consequence for G4
 
-T1 is not met on `melt_4000`. Drift and the speed comparison with M6 were not run. There is no `mma.sync` kernel. 3×TF32 stays in `reference/tf32_pair.cpp` and is not called by the engine. A compact tile, as in the 32-atom cloud, does get inside T1, so the open question is the tile geometry rather than the three-product expansion itself. Plain TF32 does not.
+T1 is not met on `melt_4000`, including after the tile is shortened to a few atoms. Drift and the speed comparison with M6 were not run. There is no `mma.sync` kernel. 3×TF32 stays in `reference/tf32_pair.cpp` and is not called by the engine. Plain TF32 does not meet the distance test either.
