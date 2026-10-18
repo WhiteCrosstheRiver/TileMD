@@ -18,8 +18,8 @@ TILEMD_HD inline bool DisplacementNeedsRebuild(float disp2, float trigger2) {
 }
 
 // Wrapped `now` on the branch `ref` was stored on. Motion below half a box
-// crosses at most one boundary. The fused kernel promotes float `pos4` values
-// and calls the same formula the host list uses on its double coordinates.
+// crosses at most one boundary. The fused kernel rebuilds a coordinate from
+// its cell-local shadow and calls the same formula the host list uses.
 TILEMD_HD inline double OnReferenceBranch(double now, double ref, double length) {
 #if defined(__CUDA_ARCH__)
   return now + length * ::rint((ref - now) / length);
@@ -66,6 +66,43 @@ TILEMD_HD inline double WrapCoord(double x, double length) {
   if (y >= length) y = 0.0;
   if (y < 0.0) y += length;
   return y;
+}
+
+// Shadow coordinates are offsets from a cell of this edge. The edge is a
+// power of two, so the cell origin is exact in binary32 out to a box of
+// length 4096. `pos4.w` holds the packed cell. The type stays in the type array.
+inline constexpr double kShadowCell = 4.0;
+inline constexpr int kShadowStride = 1024;
+
+TILEMD_HD inline int ShadowBin(double wrapped) {
+#if defined(__CUDA_ARCH__)
+  int bin = static_cast<int>(::floor(wrapped / kShadowCell));
+#else
+  int bin = static_cast<int>(std::floor(wrapped / kShadowCell));
+#endif
+  if (bin < 0) bin = 0;
+  if (bin >= kShadowStride) bin = kShadowStride - 1;
+  return bin;
+}
+
+TILEMD_HD inline float ShadowLocal(double wrapped) {
+  const int bin = ShadowBin(wrapped);
+  return static_cast<float>(wrapped - static_cast<double>(bin) * kShadowCell);
+}
+
+TILEMD_HD inline int PackShadow(int ix, int iy, int iz) {
+  return ix + kShadowStride * (iy + kShadowStride * iz);
+}
+
+TILEMD_HD inline int ShadowAxis(int packed, int axis) {
+  if (axis <= 0) return packed % kShadowStride;
+  const int rest = packed / kShadowStride;
+  if (axis == 1) return rest % kShadowStride;
+  return rest / kShadowStride;
+}
+
+TILEMD_HD inline double ShadowCoordinate(float local, int packed, int axis) {
+  return static_cast<double>(ShadowAxis(packed, axis)) * kShadowCell + static_cast<double>(local);
 }
 
 TILEMD_HD inline int ColumnIndex(double x, double edge, int ncolumn) {

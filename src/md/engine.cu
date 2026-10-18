@@ -95,10 +95,6 @@ __device__ T LoadReadOnly(const T* ptr) {
   return __ldg(ptr);
 }
 
-__device__ float MinImage(float delta, float length) {
-  return delta - length * rintf(delta / length);
-}
-
 __device__ double MinImageDouble(double delta, double length) {
   return delta - length * rint(delta / length);
 }
@@ -119,11 +115,18 @@ __device__ int MortonCell(int ix, int iy, int iz) {
   return static_cast<int>(code);
 }
 
-__device__ int CellCoord(float x, float inv_edge, int ncell) {
-  int i = static_cast<int>(floorf(x * inv_edge));
+__device__ int CellCoord(double x, double inv_edge, int ncell) {
+  int i = static_cast<int>(floor(x * inv_edge));
   if (i < 0) i = 0;
   if (i >= ncell) i = ncell - 1;
   return i;
+}
+
+__device__ double ShadowOf(float4 value, int axis) {
+  return ShadowCoordinate(axis == 0   ? value.x
+                          : axis == 1 ? value.y
+                                      : value.z,
+                          __float_as_int(value.w), axis);
 }
 
 __device__ int WrapCell(int i, int ncell, int delta) {
@@ -137,34 +140,27 @@ __device__ double WrapDouble(double x, double length, int* image) {
   return WrapImage(x, length, image);
 }
 
-__device__ float WrapFloat(float x, float length) {
-  float y = x - floorf(x / length) * length;
-  if (y >= length) y = 0.f;
-  if (y < 0.f) y += length;
-  return y;
-}
-
 __global__ void WrapAndShadow(double* x, double* y, double* z, int* imgx, int* imgy, int* imgz,
                               const int* type, float4* pos, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
+  (void)type;
   x[i] = WrapDouble(x[i], c_box[0], &imgx[i]);
   y[i] = WrapDouble(y[i], c_box[1], &imgy[i]);
   z[i] = WrapDouble(z[i], c_box[2], &imgz[i]);
-  pos[i] = make_float4(WrapFloat(static_cast<float>(x[i]), static_cast<float>(c_box[0])),
-                       WrapFloat(static_cast<float>(y[i]), static_cast<float>(c_box[1])),
-                       WrapFloat(static_cast<float>(z[i]), static_cast<float>(c_box[2])),
-                       __int_as_float(type[i]));
+  pos[i] =
+      make_float4(ShadowLocal(x[i]), ShadowLocal(y[i]), ShadowLocal(z[i]),
+                  __int_as_float(PackShadow(ShadowBin(x[i]), ShadowBin(y[i]), ShadowBin(z[i]))));
 }
 
 __global__ void RefreshShadow(const double* x, const double* y, const double* z, const int* type,
                               float4* pos, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  pos[i] = make_float4(WrapFloat(static_cast<float>(x[i]), static_cast<float>(c_box[0])),
-                       WrapFloat(static_cast<float>(y[i]), static_cast<float>(c_box[1])),
-                       WrapFloat(static_cast<float>(z[i]), static_cast<float>(c_box[2])),
-                       __int_as_float(type[i]));
+  (void)type;
+  pos[i] =
+      make_float4(ShadowLocal(x[i]), ShadowLocal(y[i]), ShadowLocal(z[i]),
+                  __int_as_float(PackShadow(ShadowBin(x[i]), ShadowBin(y[i]), ShadowBin(z[i]))));
 }
 
 __device__ bool RebuildSkipped(const int* gate) { return gate != nullptr && *gate == 0; }
@@ -174,12 +170,9 @@ __global__ void CellKeyKernel(const float4* pos, int* keys, int* indices, int n,
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float4 p = LoadReadOnly(pos + i);
-  int ix =
-      CellCoord(p.x, static_cast<float>(c_ncell[0]) / static_cast<float>(c_box[0]), c_ncell[0]);
-  int iy =
-      CellCoord(p.y, static_cast<float>(c_ncell[1]) / static_cast<float>(c_box[1]), c_ncell[1]);
-  int iz =
-      CellCoord(p.z, static_cast<float>(c_ncell[2]) / static_cast<float>(c_box[2]), c_ncell[2]);
+  int ix = CellCoord(ShadowOf(p, 0), static_cast<double>(c_ncell[0]) / c_box[0], c_ncell[0]);
+  int iy = CellCoord(ShadowOf(p, 1), static_cast<double>(c_ncell[1]) / c_box[1], c_ncell[1]);
+  int iz = CellCoord(ShadowOf(p, 2), static_cast<double>(c_ncell[2]) / c_box[2], c_ncell[2]);
   keys[i] = MortonCell(ix, iy, iz);
   indices[i] = i;
 }
@@ -239,12 +232,12 @@ __global__ void __launch_bounds__(kBlock)
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   float4 pi = LoadReadOnly(pos + i);
-  int ix =
-      CellCoord(pi.x, static_cast<float>(c_ncell[0]) / static_cast<float>(c_box[0]), c_ncell[0]);
-  int iy =
-      CellCoord(pi.y, static_cast<float>(c_ncell[1]) / static_cast<float>(c_box[1]), c_ncell[1]);
-  int iz =
-      CellCoord(pi.z, static_cast<float>(c_ncell[2]) / static_cast<float>(c_box[2]), c_ncell[2]);
+  const double xi = ShadowOf(pi, 0);
+  const double yi = ShadowOf(pi, 1);
+  const double zi = ShadowOf(pi, 2);
+  int ix = CellCoord(xi, static_cast<double>(c_ncell[0]) / c_box[0], c_ncell[0]);
+  int iy = CellCoord(yi, static_cast<double>(c_ncell[1]) / c_box[1], c_ncell[1]);
+  int iz = CellCoord(zi, static_cast<double>(c_ncell[2]) / c_box[2], c_ncell[2]);
   int count = 0;
   for (int dz = -1; dz <= 1; ++dz) {
     for (int dy = -1; dy <= 1; ++dy) {
@@ -256,11 +249,11 @@ __global__ void __launch_bounds__(kBlock)
           int j = cell_atoms[s];
           if (j == i) continue;
           float4 pj = LoadReadOnly(pos + j);
-          float dxij = MinImage(pi.x - pj.x, static_cast<float>(c_box[0]));
-          float dyij = MinImage(pi.y - pj.y, static_cast<float>(c_box[1]));
-          float dzij = MinImage(pi.z - pj.z, static_cast<float>(c_box[2]));
-          float d2 = dxij * dxij + dyij * dyij + dzij * dzij;
-          if (d2 < c_neigh_cut2) {
+          double dxij = MinImageDouble(xi - ShadowOf(pj, 0), c_box[0]);
+          double dyij = MinImageDouble(yi - ShadowOf(pj, 1), c_box[1]);
+          double dzij = MinImageDouble(zi - ShadowOf(pj, 2), c_box[2]);
+          double d2 = dxij * dxij + dyij * dyij + dzij * dzij;
+          if (d2 < static_cast<double>(c_neigh_cut2)) {
             if (count < max_neigh) nl[static_cast<long long>(count) * n + i] = j;
             ++count;
           }
@@ -566,10 +559,13 @@ __global__ void DispKernel(const float4* pos, const float4* xref, int n, DeviceS
   if (i < n) {
     float4 pi = LoadReadOnly(pos + i);
     float4 ref = LoadReadOnly(xref + i);
-    float dx = MinImage(pi.x - ref.x, static_cast<float>(c_box[0]));
-    float dy = MinImage(pi.y - ref.y, static_cast<float>(c_box[1]));
-    float dz = MinImage(pi.z - ref.z, static_cast<float>(c_box[2]));
-    d2 = dx * dx + dy * dy + dz * dz;
+    const double rx = ShadowOf(ref, 0);
+    const double ry = ShadowOf(ref, 1);
+    const double rz = ShadowOf(ref, 2);
+    const double dx = OnReferenceBranch(ShadowOf(pi, 0), rx, c_box[0]) - rx;
+    const double dy = OnReferenceBranch(ShadowOf(pi, 1), ry, c_box[1]) - ry;
+    const double dz = OnReferenceBranch(ShadowOf(pi, 2), rz, c_box[2]) - rz;
+    d2 = static_cast<float>(dx * dx + dy * dy + dz * dz);
   }
   float block_max = Reduce(reduce_storage).Reduce(d2, MaxFloat());
   if (threadIdx.x == 0) {

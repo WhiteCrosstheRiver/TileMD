@@ -81,12 +81,9 @@ __device__ double WrapTile(double value, double length, int* image) {
   return WrapImage(value, length, image);
 }
 
-__device__ float MinImageTile(float delta, float length) {
-  return delta - length * rintf(delta / length);
-}
-
-// Pair geometry for the fused step is read from pos_cur. Only the lane that
-// owns an atom writes that atom's double position and velocity, and pos_next.
+// Pair geometry for the fused step is read from pos_cur. xyz is the offset from
+// a cell of edge 4 and w is that cell. Only the lane that owns an atom writes
+// that atom's double position and velocity, and pos_next.
 struct TileIntegrate {
   double* x = nullptr;
   double* y = nullptr;
@@ -134,9 +131,14 @@ __global__ void __launch_bounds__(32)
     if (ti != kMaskType && gi >= 0) {
       const float4 self = integrate.pos_cur[gi];
       const float4 ref = integrate.xref[gi];
-      xi = OnReferenceBranchFloat(self.x, ref.x, c_tile_box[0]);
-      yi = OnReferenceBranchFloat(self.y, ref.y, c_tile_box[1]);
-      zi = OnReferenceBranchFloat(self.z, ref.z, c_tile_box[2]);
+      const int self_cell = __float_as_int(self.w);
+      const int ref_cell = __float_as_int(ref.w);
+      xi = OnReferenceBranch(ShadowCoordinate(self.x, self_cell, 0),
+                             ShadowCoordinate(ref.x, ref_cell, 0), c_tile_box[0]);
+      yi = OnReferenceBranch(ShadowCoordinate(self.y, self_cell, 1),
+                             ShadowCoordinate(ref.y, ref_cell, 1), c_tile_box[1]);
+      zi = OnReferenceBranch(ShadowCoordinate(self.z, self_cell, 2),
+                             ShadowCoordinate(ref.z, ref_cell, 2), c_tile_box[2]);
     }
   } else {
     (void)gi;
@@ -179,11 +181,16 @@ __global__ void __launch_bounds__(32)
         if (gj >= 0) {
           const float4 other_pos = integrate.pos_cur[gj];
           const float4 ref = integrate.xref[gj];
-          xj = OnReferenceBranchFloat(other_pos.x, ref.x, c_tile_box[0]) +
+          const int other_cell = __float_as_int(other_pos.w);
+          const int ref_cell = __float_as_int(ref.w);
+          xj = OnReferenceBranch(ShadowCoordinate(other_pos.x, other_cell, 0),
+                                 ShadowCoordinate(ref.x, ref_cell, 0), c_tile_box[0]) +
                static_cast<double>(sx) * c_tile_box[0];
-          yj = OnReferenceBranchFloat(other_pos.y, ref.y, c_tile_box[1]) +
+          yj = OnReferenceBranch(ShadowCoordinate(other_pos.y, other_cell, 1),
+                                 ShadowCoordinate(ref.y, ref_cell, 1), c_tile_box[1]) +
                static_cast<double>(sy) * c_tile_box[1];
-          zj = OnReferenceBranchFloat(other_pos.z, ref.z, c_tile_box[2]) +
+          zj = OnReferenceBranch(ShadowCoordinate(other_pos.z, other_cell, 2),
+                                 ShadowCoordinate(ref.z, ref_cell, 2), c_tile_box[2]) +
                static_cast<double>(sz) * c_tile_box[2];
         }
       } else {
@@ -285,8 +292,9 @@ __global__ void __launch_bounds__(32)
       integrate.x[atom_id] = xn;
       integrate.y[atom_id] = yn;
       integrate.z[atom_id] = zn;
-      integrate.pos_next[atom_id] = make_float4(static_cast<float>(xn), static_cast<float>(yn),
-                                                static_cast<float>(zn), __int_as_float(ti));
+      integrate.pos_next[atom_id] =
+          make_float4(ShadowLocal(xn), ShadowLocal(yn), ShadowLocal(zn),
+                      __int_as_float(PackShadow(ShadowBin(xn), ShadowBin(yn), ShadowBin(zn))));
       if (integrate.status != nullptr && (!isfinite(rx) || !isfinite(ry) || !isfinite(rz) ||
                                           !isfinite(xn) || !isfinite(yn) || !isfinite(zn))) {
         FlagNonFinite(integrate.status, atom_id);
@@ -321,13 +329,14 @@ __global__ void __launch_bounds__(32)
     float disp2 = 0.f;
     if (atom_id >= 0 && integrate.xref != nullptr) {
       const float4 ref = integrate.xref[atom_id];
-      const float dx =
-          MinImageTile(static_cast<float>(xn) - ref.x, static_cast<float>(c_tile_box[0]));
-      const float dy =
-          MinImageTile(static_cast<float>(yn) - ref.y, static_cast<float>(c_tile_box[1]));
-      const float dz =
-          MinImageTile(static_cast<float>(zn) - ref.z, static_cast<float>(c_tile_box[2]));
-      disp2 = dx * dx + dy * dy + dz * dz;
+      const int ref_cell = __float_as_int(ref.w);
+      const double rx = ShadowCoordinate(ref.x, ref_cell, 0);
+      const double ry = ShadowCoordinate(ref.y, ref_cell, 1);
+      const double rz = ShadowCoordinate(ref.z, ref_cell, 2);
+      const double dx = OnReferenceBranch(xn, rx, c_tile_box[0]) - rx;
+      const double dy = OnReferenceBranch(yn, ry, c_tile_box[1]) - ry;
+      const double dz = OnReferenceBranch(zn, rz, c_tile_box[2]) - rz;
+      disp2 = static_cast<float>(dx * dx + dy * dy + dz * dz);
     }
     float warp_max = disp2;
 #pragma unroll

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -276,6 +277,93 @@ TEST(Integrator, FloatCoordinatesChangeTheMeltForce) {
   std::cout << "pos4 melt force rel " << rel << "\n";
   EXPECT_GT(rel, 4.0e-5);
   EXPECT_LT(rel, 8.0e-5);
+}
+
+void ShadowRoundTrip(double x, double y, double z, double* ox, double* oy, double* oz) {
+  const int packed =
+      tilemd::PackShadow(tilemd::ShadowBin(x), tilemd::ShadowBin(y), tilemd::ShadowBin(z));
+  *ox = tilemd::ShadowCoordinate(tilemd::ShadowLocal(x), packed, 0);
+  *oy = tilemd::ShadowCoordinate(tilemd::ShadowLocal(y), packed, 1);
+  *oz = tilemd::ShadowCoordinate(tilemd::ShadowLocal(z), packed, 2);
+}
+
+tilemd::ref::Observables ForceFromShiftedCoordinates(tilemd::ref::System system,
+                                                     const tilemd::ref::Dynamics& state,
+                                                     double shift, bool shadow) {
+  const int n = tilemd::ref::NumAtoms(system);
+  system.x.resize(static_cast<size_t>(n));
+  system.y.resize(static_cast<size_t>(n));
+  system.z.resize(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    double x = state.x[static_cast<size_t>(i)] + shift;
+    double y = state.y[static_cast<size_t>(i)] + shift;
+    double z = state.z[static_cast<size_t>(i)] + shift;
+    if (shadow) {
+      ShadowRoundTrip(x, y, z, &x, &y, &z);
+    } else {
+      x = static_cast<double>(static_cast<float>(x));
+      y = static_cast<double>(static_cast<float>(y));
+      z = static_cast<double>(static_cast<float>(z));
+    }
+    system.x[static_cast<size_t>(i)] = x - shift;
+    system.y[static_cast<size_t>(i)] = y - shift;
+    system.z[static_cast<size_t>(i)] = z - shift;
+  }
+  return tilemd::ref::Compute(system);
+}
+
+TEST(Integrator, CellLocalShadowHoldsABoxOfLength270) {
+  EXPECT_EQ(tilemd::ShadowBin(0.0), 0);
+  EXPECT_EQ(tilemd::ShadowBin(269.5), 67);
+  EXPECT_EQ(tilemd::ShadowBin(4096.0), tilemd::kShadowStride - 1);
+  const int corner = tilemd::PackShadow(67, 67, 67);
+  EXPECT_EQ(tilemd::ShadowAxis(corner, 0), 67);
+  EXPECT_EQ(tilemd::ShadowAxis(corner, 1), 67);
+  EXPECT_EQ(tilemd::ShadowAxis(corner, 2), 67);
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+  ShadowRoundTrip(269.5, 0.125, 4.0, &x, &y, &z);
+  EXPECT_NEAR(x, 269.5, 1.0e-6);
+  EXPECT_NEAR(y, 0.125, 1.0e-6);
+  EXPECT_NEAR(z, 4.0, 1.0e-6);
+
+  const std::filesystem::path dir = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "fixtures";
+  tilemd::ref::System system = tilemd::ref::ReadExtxyz((dir / "melt_4000.extxyz").string());
+  tilemd::ref::ReadSystemHeader((dir / "melt_4000.json").string(), system);
+  tilemd::ref::Dynamics state;
+  state.x = system.x;
+  state.y = system.y;
+  state.z = system.z;
+  const tilemd::ref::Observables oracle = tilemd::ref::Compute(system);
+  // 256 is the binade of a box of length ~270. The shift is a multiple of the
+  // shadow cell, so the local offset is the original coordinate modulo 4.
+  constexpr double kShift = 256.0;
+  const tilemd::ref::Observables absolute =
+      ForceFromShiftedCoordinates(system, state, kShift, false);
+  const tilemd::ref::Observables local = ForceFromShiftedCoordinates(system, state, kShift, true);
+  const double absolute_rel = ForceRelative(absolute, oracle);
+  const double local_rel = ForceRelative(local, oracle);
+  double absolute_x = 0.0;
+  double local_x = 0.0;
+  for (int i = 0; i < tilemd::ref::NumAtoms(system); ++i) {
+    const double placed = state.x[static_cast<size_t>(i)] + kShift;
+    absolute_x =
+        std::max(absolute_x, std::abs(static_cast<double>(static_cast<float>(placed)) - placed));
+    double rx = 0.0;
+    double ry = 0.0;
+    double rz = 0.0;
+    ShadowRoundTrip(placed, placed, placed, &rx, &ry, &rz);
+    local_x = std::max(local_x, std::abs(rx - placed));
+  }
+  std::cout << std::scientific << std::setprecision(8) << "L270 absolute force rel " << absolute_rel
+            << " cell force rel " << local_rel << " absolute |dx| " << absolute_x << " cell |dx| "
+            << local_x << "\n";
+  EXPECT_GT(absolute_rel, 1.0e-3);
+  EXPECT_LT(absolute_rel, 3.0e-3);
+  EXPECT_LT(local_rel, 1.0e-5);
+  EXPECT_GT(absolute_x, 1.0e-5);
+  EXPECT_LT(local_x, 5.0e-7);
 }
 
 TEST(Integrator, FloatCoordinatesDriftFromDoubleLeapfrog) {
