@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -648,4 +649,92 @@ TEST(GpuLj, EamSetflKernelMatchesTheLaneWalk) {
   EXPECT_LT(error, 1.0e-9);
   EXPECT_NEAR(got.potential_energy, host.potential_energy,
               1.0e-9 * (1.0 + std::abs(host.potential_energy)));
+}
+
+tilemd::ref::System LatticeBox() {
+  tilemd::ref::System system;
+  system.box[0] = 12.0;
+  system.box[1] = 12.0;
+  system.box[2] = 12.0;
+  system.shift = tilemd::ref::Shift::Force;
+  system.pairs.push_back({0, 0, 1.0, 1.0, 2.5});
+  for (int iz = 0; iz < 5; ++iz) {
+    for (int iy = 0; iy < 5; ++iy) {
+      for (int ix = 0; ix < 5; ++ix) {
+        system.type.push_back(0);
+        system.x.push_back(1.0 + 2.2 * ix);
+        system.y.push_back(1.0 + 2.2 * iy);
+        system.z.push_back(1.0 + 2.2 * iz);
+      }
+    }
+  }
+  return system;
+}
+
+double MaxAbsDelta(const std::vector<double>& a, const std::vector<double>& b) {
+  double max_delta = 0.0;
+  for (int i = 0; i < static_cast<int>(a.size()); ++i) {
+    max_delta =
+        std::max(max_delta, std::abs(a[static_cast<size_t>(i)] - b[static_cast<size_t>(i)]));
+  }
+  return max_delta;
+}
+
+// Device fused leapfrog against the double-precision CPU leapfrog. The pair
+// geometry on the device is the cell-local shadow, so the residual is that
+// rounding, not a second integrator.
+TEST(GpuLj, FusedLeapfrogMatchesTheCpuFor100Steps) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const tilemd::ref::System origin = LatticeBox();
+  const int n = static_cast<int>(origin.x.size());
+  std::vector<double> vx(static_cast<size_t>(n));
+  std::vector<double> vy(static_cast<size_t>(n));
+  std::vector<double> vz(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] = 0.02 * ((i % 5) - 2);
+    vy[static_cast<size_t>(i)] = 0.015 * ((i % 4) - 1);
+    vz[static_cast<size_t>(i)] = 0.01 * ((i % 3) - 1);
+  }
+  constexpr double dt = 0.005;
+  constexpr double mass = 1.0;
+  tilemd::ref::System cpu_system = origin;
+  tilemd::ref::Dynamics cpu = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::PrepareLeapfrog(cpu_system, cpu, dt, mass);
+  for (int step = 0; step < 100; ++step) {
+    tilemd::ref::LeapfrogStep(cpu_system, cpu, dt, mass);
+  }
+
+  const bool rebuilds[] = {true, false};
+  for (bool rebuild_every_step : rebuilds) {
+    tilemd::HostSystem host = FromReference(origin, 0.3, 0, rebuild_every_step);
+    host.use_cluster_tiles = true;
+    host.dt = dt;
+    host.mass = mass;
+    host.vx = vx;
+    host.vy = vy;
+    host.vz = vz;
+    tilemd::Engine engine(std::move(host));
+    engine.Run(100);
+    std::vector<double> x;
+    std::vector<double> y;
+    std::vector<double> z;
+    std::vector<double> gvx;
+    std::vector<double> gvy;
+    std::vector<double> gvz;
+    engine.DownloadPositions(x, y, z);
+    engine.DownloadVelocities(gvx, gvy, gvz);
+    const double max_x =
+        std::max(MaxAbsDelta(x, cpu.x), std::max(MaxAbsDelta(y, cpu.y), MaxAbsDelta(z, cpu.z)));
+    const double max_v = std::max(MaxAbsDelta(gvx, cpu.vx),
+                                  std::max(MaxAbsDelta(gvy, cpu.vy), MaxAbsDelta(gvz, cpu.vz)));
+    std::cout << std::scientific << std::setprecision(8) << "fused 100 rebuild " << std::boolalpha
+              << rebuild_every_step << " moved " << MaxAbsDelta(cpu.x, origin.x) << " max |dx| "
+              << max_x << " max |dv| " << max_v << "\n";
+    ASSERT_EQ(x.size(), static_cast<size_t>(n));
+    EXPECT_GT(MaxAbsDelta(cpu.x, origin.x), 1.0e-3);
+    EXPECT_TRUE(std::isfinite(max_x));
+    EXPECT_TRUE(std::isfinite(max_v));
+    EXPECT_LT(max_x, 1.0e-7) << "rebuild_every_step " << rebuild_every_step;
+    EXPECT_LT(max_v, 1.0e-7) << "rebuild_every_step " << rebuild_every_step;
+  }
 }
