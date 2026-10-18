@@ -32,6 +32,11 @@ function(tilemd_apply_cuda_flags target)
     $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
   )
+  # CCCL (CUB) rejects MSVC's traditional preprocessor.
+  if(MSVC)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
+  endif()
   if(TILEMD_FAST_MATH)
     target_compile_options(${target} PRIVATE
       $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
@@ -59,6 +64,10 @@ target_compile_features(tilemd_reference PUBLIC cxx_std_17)
 add_executable(tilemd_make_fixtures reference/make_fixtures.cpp)
 target_link_libraries(tilemd_make_fixtures PRIVATE tilemd_reference)
 
+add_library(tilemd_engine STATIC src/md/engine.cu)
+target_link_libraries(tilemd_engine PUBLIC tilemd_headers)
+tilemd_apply_cuda_flags(tilemd_engine)
+
 if(TILEMD_BUILD_TESTS)
   include(CTest)
   enable_testing()
@@ -81,8 +90,10 @@ if(TILEMD_BUILD_TESTS)
   file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" TILEMD_SOURCE_DIR_FWD)
   target_compile_definitions(tilemd_cpu_tests PRIVATE TILEMD_SOURCE_DIR="${TILEMD_SOURCE_DIR_FWD}")
 
-  add_executable(tilemd_gpu_tests tests/unit/gpu_smoke.cu)
-  target_link_libraries(tilemd_gpu_tests PRIVATE GTest::gtest_main tilemd_headers)
+  add_executable(tilemd_gpu_tests tests/unit/gpu_smoke.cu tests/gpu/lj_gpu_test.cu)
+  target_link_libraries(tilemd_gpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_engine
+                                                 tilemd_reference)
+  target_compile_definitions(tilemd_gpu_tests PRIVATE TILEMD_SOURCE_DIR="${TILEMD_SOURCE_DIR_FWD}")
   tilemd_apply_cuda_flags(tilemd_gpu_tests)
 
   add_test(NAME cpu_smoke COMMAND tilemd_cpu_tests)
