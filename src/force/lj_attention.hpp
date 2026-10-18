@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "force/lj_scalar.hpp"
 #include "force/pair_attention.hpp"
 
 namespace tilemd {
@@ -21,6 +22,7 @@ struct AttentionPair {
 class LjAttention {
  public:
   static constexpr int kNumPasses = 1;
+  static constexpr int kMaxTypes = 8;
 
   LjAttention(const AttentionPair* pairs, int npair, AttentionShift shift) : shift_(shift) {
     if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
@@ -39,39 +41,26 @@ class LjAttention {
   void Prepare(int) {}
 
   PairOutput PairScalar(int, double r2, int type_i, int type_j, int, int) const {
-    const Row& row = table_[type_i][type_j];
+    const LjRow& row = table_[type_i][type_j];
     if (!row.defined) throw std::invalid_argument("missing pair coefficient");
     if (!(r2 < row.rc2)) return {};
-    const double inv_r2 = 1.0 / r2;
-    const double sr2 = row.sigma2 * inv_r2;
-    const double sr6 = sr2 * sr2 * sr2;
-    double s = row.eps24 * inv_r2 * sr6 * (2.0 * sr6 - 1.0);
-    double u = row.eps4 * sr6 * (sr6 - 1.0) - row.u_shift;
-    if (shift_ == AttentionShift::Force) {
-      const double r = std::sqrt(r2);
-      u += (r - row.rc) * row.s_rc * row.rc;
-      s -= row.s_rc * row.rc / r;
-    }
     PairOutput out;
-    out.force = s;
-    out.energy = u;
+    LjEvaluate(row, r2, shift_ == AttentionShift::Force ? 1 : 0, &out.force, &out.energy);
     return out;
   }
+
+  // Row-major type_i * kMaxTypes + type_j. The device kernel reads this table.
+  void CopyTable(LjRow out[kMaxTypes * kMaxTypes]) const {
+    for (int ti = 0; ti < kMaxTypes; ++ti) {
+      for (int tj = 0; tj < kMaxTypes; ++tj) out[ti * kMaxTypes + tj] = table_[ti][tj];
+    }
+  }
+
+  int ForceShift() const { return shift_ == AttentionShift::Force ? 1 : 0; }
 
   double AtomUpdate(int, int, double) const { return 0.0; }
 
  private:
-  struct Row {
-    bool defined = false;
-    double sigma2 = 0.0;
-    double eps4 = 0.0;
-    double eps24 = 0.0;
-    double rc = 0.0;
-    double rc2 = 0.0;
-    double u_shift = 0.0;
-    double s_rc = 0.0;
-  };
-
   void Store(const AttentionPair& coeff) {
     if (coeff.type_i < 0 || coeff.type_j < 0 || coeff.type_i >= kMaxTypes ||
         coeff.type_j >= kMaxTypes) {
@@ -80,8 +69,8 @@ class LjAttention {
     if (!(coeff.cutoff > 0.0) || !(coeff.sigma > 0.0)) {
       throw std::invalid_argument("sigma and cutoff must be positive");
     }
-    Row& row = table_[coeff.type_i][coeff.type_j];
-    row.defined = true;
+    LjRow& row = table_[coeff.type_i][coeff.type_j];
+    row.defined = 1;
     row.sigma2 = coeff.sigma * coeff.sigma;
     row.eps4 = 4.0 * coeff.epsilon;
     row.eps24 = 24.0 * coeff.epsilon;
@@ -96,10 +85,15 @@ class LjAttention {
     if (coeff.cutoff > max_cut_) max_cut_ = coeff.cutoff;
   }
 
-  static constexpr int kMaxTypes = 8;
   AttentionShift shift_ = AttentionShift::None;
   double max_cut_ = 0.0;
-  Row table_[kMaxTypes][kMaxTypes] = {};
+  LjRow table_[kMaxTypes][kMaxTypes] = {};
 };
+
+// Full-list pair attention for Lennard-Jones, one thread per atom. The host
+// reduction of energy and virial walks atoms in index order.
+AttentionResult RunLjAttentionGpu(const double* box, const double* x, const double* y,
+                                  const double* z, const int* type, int n,
+                                  const AttentionPair* pairs, int npair, AttentionShift shift);
 
 }  // namespace tilemd

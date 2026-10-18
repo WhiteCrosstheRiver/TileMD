@@ -72,6 +72,10 @@ add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp)
 target_link_libraries(tilemd_cluster PUBLIC tilemd_headers)
 target_compile_features(tilemd_cluster PUBLIC cxx_std_17)
 
+add_library(tilemd_attention STATIC src/force/lj_attention.cu)
+target_link_libraries(tilemd_attention PUBLIC tilemd_headers)
+tilemd_apply_cuda_flags(tilemd_attention)
+
 add_library(tilemd_engine STATIC src/md/engine.cu src/md/tile_force.cu)
 target_link_libraries(tilemd_engine PUBLIC tilemd_headers tilemd_cluster)
 tilemd_apply_cuda_flags(tilemd_engine)
@@ -109,7 +113,7 @@ if(TILEMD_BUILD_TESTS)
 
   add_executable(tilemd_gpu_tests tests/unit/gpu_smoke.cu tests/gpu/lj_gpu_test.cu)
   target_link_libraries(tilemd_gpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_engine
-                                                 tilemd_reference)
+                                                 tilemd_reference tilemd_attention)
   target_compile_definitions(tilemd_gpu_tests PRIVATE TILEMD_SOURCE_DIR="${TILEMD_SOURCE_DIR_FWD}")
   tilemd_apply_cuda_flags(tilemd_gpu_tests)
 

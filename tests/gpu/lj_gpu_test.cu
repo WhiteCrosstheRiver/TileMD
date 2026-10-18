@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "force/lj_attention.hpp"
 #include "lj_reference.hpp"
 #include "md/engine.hpp"
 
@@ -458,4 +459,49 @@ TEST(GpuLj, ClusterTileMatchesOracle) {
   host.use_cluster_tiles = true;
   tilemd::Engine engine(std::move(host));
   ExpectClose(engine.ComputeForces(), expected, "cluster tiles");
+}
+
+TEST(GpuLj, AttentionKernelMatchesOracle) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const char* names[] = {"boundary_500", "cutoff_500", "twotype_2000", "melt_4000"};
+  const std::filesystem::path dir = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "fixtures";
+  for (const char* name : names) {
+    tilemd::ref::System system =
+        tilemd::ref::ReadExtxyz((dir / (std::string(name) + ".extxyz")).string());
+    tilemd::ref::ReadSystemHeader((dir / (std::string(name) + ".json")).string(), system);
+    std::vector<tilemd::AttentionPair> pairs;
+    for (const tilemd::ref::PairCoeff& coeff : system.pairs) {
+      tilemd::AttentionPair pair;
+      pair.type_i = coeff.type_i;
+      pair.type_j = coeff.type_j;
+      pair.epsilon = coeff.epsilon;
+      pair.sigma = coeff.sigma;
+      pair.cutoff = coeff.cutoff;
+      pairs.push_back(pair);
+    }
+    tilemd::AttentionShift shift = tilemd::AttentionShift::None;
+    if (system.shift == tilemd::ref::Shift::Energy) shift = tilemd::AttentionShift::Energy;
+    if (system.shift == tilemd::ref::Shift::Force) shift = tilemd::AttentionShift::Force;
+    const tilemd::AttentionResult got = tilemd::RunLjAttentionGpu(
+        system.box, system.x.data(), system.y.data(), system.z.data(), system.type.data(),
+        tilemd::ref::NumAtoms(system), pairs.data(), static_cast<int>(pairs.size()), shift);
+    const tilemd::ref::Observables expected = tilemd::ref::Compute(system);
+    const int n = tilemd::ref::NumAtoms(system);
+    double max_delta = 0.0;
+    double sum_sq = 0.0;
+    for (int i = 0; i < n; ++i) {
+      const double dx = got.fx[static_cast<size_t>(i)] - expected.fx[static_cast<size_t>(i)];
+      const double dy = got.fy[static_cast<size_t>(i)] - expected.fy[static_cast<size_t>(i)];
+      const double dz = got.fz[static_cast<size_t>(i)] - expected.fz[static_cast<size_t>(i)];
+      max_delta = std::max(max_delta, std::sqrt(dx * dx + dy * dy + dz * dz));
+      sum_sq += expected.fx[static_cast<size_t>(i)] * expected.fx[static_cast<size_t>(i)] +
+                expected.fy[static_cast<size_t>(i)] * expected.fy[static_cast<size_t>(i)] +
+                expected.fz[static_cast<size_t>(i)] * expected.fz[static_cast<size_t>(i)];
+    }
+    const double rms = std::sqrt(sum_sq / static_cast<double>(n));
+    EXPECT_LT(max_delta / std::max(rms, 1.0), 1.0e-10) << name;
+    EXPECT_NEAR(got.potential_energy, expected.potential_energy,
+                1.0e-10 * (1.0 + std::abs(expected.potential_energy)))
+        << name;
+  }
 }
