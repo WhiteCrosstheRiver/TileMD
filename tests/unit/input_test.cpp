@@ -6,8 +6,10 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "io/run.hpp"
 
@@ -234,4 +236,150 @@ TEST(Input, StructureLoadsPositions) {
   const tilemd::SimulationInput input = tilemd::ParseInput(text, dir.string());
   EXPECT_EQ(tilemd::ref::NumAtoms(input.system), 500);
   EXPECT_EQ(Momentum(input.vx), 0.0);
+}
+
+TEST(Input, StructureKeepsVelocitiesWhenNoVelocityLine) {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "tilemd_input_vel.extxyz";
+  {
+    std::ofstream out(path);
+    out << "1\n";
+    out << "Lattice=\"8 0 0 0 8 0 0 0 8\" Properties=species:S:1:pos:R:3:vel:R:3:type:I:1 "
+           "shift=none pbc=\"T T T\"\n";
+    out << "A 1.25 2.5 3.75 0.125 -0.25 0.5 0\n";
+  }
+  const std::string text = "structure " + path.string() +
+                           "\n"
+                           "lj 0 0 epsilon 1.0 sigma 1.0 cutoff 2.5\n";
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  EXPECT_DOUBLE_EQ(input.vx[0], 0.125);
+  EXPECT_DOUBLE_EQ(input.vy[0], -0.25);
+  EXPECT_DOUBLE_EQ(input.vz[0], 0.5);
+  std::filesystem::remove(path);
+}
+
+void CopperVelocity(int n, std::vector<double>* vx, std::vector<double>* vy,
+                    std::vector<double>* vz) {
+  vx->assign(static_cast<size_t>(n), 0.0);
+  vy->assign(static_cast<size_t>(n), 0.0);
+  vz->assign(static_cast<size_t>(n), 0.0);
+  double mx = 0.0;
+  double my = 0.0;
+  double mz = 0.0;
+  for (int i = 0; i < n; ++i) {
+    (*vx)[static_cast<size_t>(i)] = 0.8 * ((i % 7) - 3);
+    (*vy)[static_cast<size_t>(i)] = 0.5 * ((i % 5) - 2);
+    (*vz)[static_cast<size_t>(i)] = 0.4 * ((i % 3) - 1);
+    mx += (*vx)[static_cast<size_t>(i)];
+    my += (*vy)[static_cast<size_t>(i)];
+    mz += (*vz)[static_cast<size_t>(i)];
+  }
+  mx /= static_cast<double>(n);
+  my /= static_cast<double>(n);
+  mz /= static_cast<double>(n);
+  for (int i = 0; i < n; ++i) {
+    (*vx)[static_cast<size_t>(i)] -= mx;
+    (*vy)[static_cast<size_t>(i)] -= my;
+    (*vz)[static_cast<size_t>(i)] -= mz;
+  }
+}
+
+TEST(Input, EamRunMatchesLammpsCopper) {
+  const std::filesystem::path table =
+      std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" / "potentials" / "Cu_u3.eam";
+  const std::filesystem::path start = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                      "validation" / "lammps_ref" / "cu_u3_108.txt";
+  const std::filesystem::path ref = std::filesystem::path(TILEMD_SOURCE_DIR) / "tests" /
+                                    "validation" / "lammps_ref" / "cu_u3_nve_100.txt";
+  if (!std::filesystem::exists(table) || !std::filesystem::exists(start) ||
+      !std::filesystem::exists(ref)) {
+    GTEST_SKIP() << "Cu NVE reference has not been generated";
+  }
+  std::ifstream initial(start);
+  int n = 0;
+  double box[3];
+  double energy0 = 0.0;
+  initial >> n >> box[0] >> box[1] >> box[2] >> energy0;
+  std::vector<double> x(static_cast<size_t>(n));
+  std::vector<double> y(static_cast<size_t>(n));
+  std::vector<double> z(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    double fx = 0.0;
+    double fy = 0.0;
+    double fz = 0.0;
+    initial >> x[static_cast<size_t>(i)] >> y[static_cast<size_t>(i)] >>
+        z[static_cast<size_t>(i)] >> fx >> fy >> fz;
+  }
+  ASSERT_TRUE(static_cast<bool>(initial));
+  std::vector<double> vx;
+  std::vector<double> vy;
+  std::vector<double> vz;
+  CopperVelocity(n, &vx, &vy, &vz);
+  const std::filesystem::path xyz =
+      std::filesystem::temp_directory_path() / "tilemd_cu_input.extxyz";
+  {
+    std::ofstream out(xyz);
+    out.setf(std::ios::scientific);
+    out.precision(17);
+    out << n << "\n";
+    out << "Lattice=\"" << box[0] << " 0 0 0 " << box[1] << " 0 0 0 " << box[2]
+        << "\" Properties=species:S:1:pos:R:3:vel:R:3:type:I:1 shift=none pbc=\"T T T\"\n";
+    for (int i = 0; i < n; ++i) {
+      out << "A " << x[static_cast<size_t>(i)] << " " << y[static_cast<size_t>(i)] << " "
+          << z[static_cast<size_t>(i)] << " " << vx[static_cast<size_t>(i)] << " "
+          << vy[static_cast<size_t>(i)] << " " << vz[static_cast<size_t>(i)] << " 0\n";
+    }
+  }
+  const std::filesystem::path dump =
+      std::filesystem::temp_directory_path() / "tilemd_cu_input.dump.extxyz";
+  std::filesystem::remove(dump);
+  const std::string text = "units metal\nstructure " + xyz.string() + "\neam " + table.string() +
+                           "\ntimestep 0.001\nthermo_every 100\ndump_every 100\nrun 100\n";
+  const tilemd::SimulationInput input = tilemd::ParseInput(text, ".");
+  EXPECT_DOUBLE_EQ(input.mass, 63.55);
+  const std::vector<tilemd::ThermoRow> rows = tilemd::RunReference(input, dump.string());
+  ASSERT_EQ(rows.size(), 2u);
+  EXPECT_NEAR(rows[0].potential_per_atom * static_cast<double>(n), energy0,
+              1.0e-8 * (1.0 + std::abs(energy0)));
+  const tilemd::ref::ExtxyzFrame later = tilemd::ref::ReadExtxyzFrame(dump.string(), 1);
+  std::ifstream in(ref);
+  int n_ref = 0;
+  double box_ref[3];
+  double dt_ref = 0.0;
+  int steps_ref = 0;
+  double energy = 0.0;
+  in >> n_ref >> box_ref[0] >> box_ref[1] >> box_ref[2] >> dt_ref >> steps_ref >> energy;
+  ASSERT_EQ(n_ref, n);
+  ASSERT_EQ(steps_ref, 100);
+  double max_dx = 0.0;
+  double max_dv = 0.0;
+  for (int i = 0; i < n; ++i) {
+    double rx = 0.0;
+    double ry = 0.0;
+    double rz = 0.0;
+    double rvx = 0.0;
+    double rvy = 0.0;
+    double rvz = 0.0;
+    in >> rx >> ry >> rz >> rvx >> rvy >> rvz;
+    const double dx = later.system.x[static_cast<size_t>(i)] - rx -
+                      box[0] * std::rint((later.system.x[static_cast<size_t>(i)] - rx) / box[0]);
+    const double dy = later.system.y[static_cast<size_t>(i)] - ry -
+                      box[1] * std::rint((later.system.y[static_cast<size_t>(i)] - ry) / box[1]);
+    const double dz = later.system.z[static_cast<size_t>(i)] - rz -
+                      box[2] * std::rint((later.system.z[static_cast<size_t>(i)] - rz) / box[2]);
+    max_dx = std::max(max_dx, std::sqrt(dx * dx + dy * dy + dz * dz));
+    const double dvx = later.vx[static_cast<size_t>(i)] - rvx;
+    const double dvy = later.vy[static_cast<size_t>(i)] - rvy;
+    const double dvz = later.vz[static_cast<size_t>(i)] - rvz;
+    max_dv = std::max(max_dv, std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz));
+  }
+  ASSERT_TRUE(static_cast<bool>(in));
+  std::cout << std::scientific << std::setprecision(8) << "input eam nve max |dx| " << max_dx
+            << " max |dv| " << max_dv << "\n";
+  EXPECT_LT(max_dx, 1.0e-8);
+  EXPECT_LT(max_dv, 1.0e-8);
+  EXPECT_NEAR(rows[1].potential_per_atom * static_cast<double>(n), energy,
+              1.0e-6 * (1.0 + std::abs(energy)));
+  std::filesystem::remove(xyz);
+  std::filesystem::remove(dump);
 }

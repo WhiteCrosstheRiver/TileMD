@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "force/eam.hpp"
+
 namespace tilemd {
 namespace {
 
@@ -151,9 +153,10 @@ void FillVelocities(SimulationInput& input, double temperature, std::uint32_t se
 
 SimulationInput ParseInput(const std::string& text, const std::string& base_dir) {
   const std::vector<Command> commands = Lex(text);
-  const char* known[] = {"units",    "box",          "structure",  "types",        "lj",
-                         "lj_shift", "mass",         "velocity",   "skin",         "timestep",
-                         "ensemble", "thermo_every", "dump_every", "graph_unroll", "run"};
+  const char* known[] = {"units",        "box",        "structure",    "types",
+                         "lj",           "lj_shift",   "eam",          "mass",
+                         "velocity",     "skin",       "timestep",     "ensemble",
+                         "thermo_every", "dump_every", "graph_unroll", "run"};
   for (const Command& command : commands) {
     bool match = false;
     for (const char* key : known) {
@@ -163,16 +166,32 @@ SimulationInput ParseInput(const std::string& text, const std::string& base_dir)
   }
 
   SimulationInput input;
+  bool metal_units = false;
   if (const Command* units = Find(commands, "units")) {
     RequireCount(*units, 1);
-    if (units->args[0] != "lj") throw std::runtime_error("stage 1 units are lj");
+    if (units->args[0] == "lj")
+      metal_units = false;
+    else if (units->args[0] == "metal")
+      metal_units = true;
+    else
+      throw std::runtime_error("units must be lj or metal");
   }
+  if (const Command* eam = Find(commands, "eam")) {
+    RequireCount(*eam, 1);
+    input.eam_path = (std::filesystem::path(base_dir) / eam->args[0]).string();
+    input.metal = true;
+  }
+  if (input.metal && !metal_units) throw std::runtime_error("eam requires units metal");
+  if (metal_units && !input.metal) throw std::runtime_error("units metal needs an eam file");
 
   const Command* box = Find(commands, "box");
   const Command* structure = Find(commands, "structure");
   if ((box == nullptr) == (structure == nullptr)) {
     throw std::runtime_error("input needs one of box or structure");
   }
+  std::vector<double> file_vx;
+  std::vector<double> file_vy;
+  std::vector<double> file_vz;
   if (box != nullptr) {
     RequireCount(*box, 5);
     if (box->args[0] != "fcc") throw std::runtime_error("stage 1 box is fcc");
@@ -180,14 +199,17 @@ SimulationInput ParseInput(const std::string& text, const std::string& base_dir)
   } else {
     RequireCount(*structure, 1);
     const std::filesystem::path file = std::filesystem::path(base_dir) / structure->args[0];
-    ref::System loaded = ref::ReadExtxyz(file.string());
-    input.system.box[0] = loaded.box[0];
-    input.system.box[1] = loaded.box[1];
-    input.system.box[2] = loaded.box[2];
-    input.system.type = std::move(loaded.type);
-    input.system.x = std::move(loaded.x);
-    input.system.y = std::move(loaded.y);
-    input.system.z = std::move(loaded.z);
+    ref::ExtxyzFrame loaded = ref::ReadExtxyzFrame(file.string());
+    input.system.box[0] = loaded.system.box[0];
+    input.system.box[1] = loaded.system.box[1];
+    input.system.box[2] = loaded.system.box[2];
+    input.system.type = std::move(loaded.system.type);
+    input.system.x = std::move(loaded.system.x);
+    input.system.y = std::move(loaded.system.y);
+    input.system.z = std::move(loaded.system.z);
+    file_vx = std::move(loaded.vx);
+    file_vy = std::move(loaded.vy);
+    file_vz = std::move(loaded.vz);
   }
 
   if (const Command* types = Find(commands, "types")) {
@@ -215,9 +237,14 @@ SimulationInput ParseInput(const std::string& text, const std::string& base_dir)
     coeff.cutoff = Number(command, 7);
     input.system.pairs.push_back(coeff);
   }
-  if (input.system.pairs.empty()) throw std::runtime_error("input needs an lj line");
+  if (input.metal && !input.system.pairs.empty()) {
+    throw std::runtime_error("eam input does not take an lj line");
+  }
+  if (!input.metal && input.system.pairs.empty())
+    throw std::runtime_error("input needs an lj line");
 
   if (const Command* shift = Find(commands, "lj_shift")) {
+    if (input.metal) throw std::runtime_error("lj_shift does not apply to eam");
     RequireCount(*shift, 1);
     if (shift->args[0] == "none")
       input.system.shift = ref::Shift::None;
@@ -229,12 +256,15 @@ SimulationInput ParseInput(const std::string& text, const std::string& base_dir)
       throw std::runtime_error("lj_shift must be none, energy, or force");
   }
 
+  bool mass_set = false;
   if (const Command* mass = Find(commands, "mass")) {
     RequireCount(*mass, 2);
     if (Integer(*mass, 0) != 0) throw std::runtime_error("stage 1 has one mass, on type 0");
     input.mass = Number(*mass, 1);
     if (!(input.mass > 0.0)) throw std::runtime_error("mass must be positive");
+    mass_set = true;
   }
+  if (input.metal && !mass_set) input.mass = EamFuncfl(input.eam_path).Mass();
 
   const int n = ref::NumAtoms(input.system);
   input.vx.assign(static_cast<size_t>(n), 0.0);
@@ -244,6 +274,13 @@ SimulationInput ParseInput(const std::string& text, const std::string& base_dir)
     RequireCount(*velocity, 3);
     if (velocity->args[1] != "seed") throw std::runtime_error("velocity line needs a seed");
     FillVelocities(input, Number(*velocity, 0), static_cast<std::uint32_t>(Integer(*velocity, 2)));
+  } else if (!file_vx.empty()) {
+    if (static_cast<int>(file_vx.size()) != n) {
+      throw std::runtime_error("structure velocity count does not match the atoms");
+    }
+    input.vx = std::move(file_vx);
+    input.vy = std::move(file_vy);
+    input.vz = std::move(file_vz);
   }
 
   if (const Command* skin = Find(commands, "skin")) {

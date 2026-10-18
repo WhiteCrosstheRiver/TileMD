@@ -71,6 +71,7 @@ target_compile_features(tilemd_io PUBLIC cxx_std_17)
 add_library(tilemd_eam STATIC src/force/eam.cpp)
 target_link_libraries(tilemd_eam PUBLIC tilemd_headers)
 target_compile_features(tilemd_eam PUBLIC cxx_std_17)
+target_link_libraries(tilemd_io PUBLIC tilemd_eam)
 
 add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp)
 target_link_libraries(tilemd_cluster PUBLIC tilemd_headers)

@@ -7,16 +7,17 @@
 #include <stdexcept>
 #include <string>
 
+#include "force/eam.hpp"
+
 namespace tilemd {
 namespace {
 
-ThermoRow Sample(const SimulationInput& input, const ref::Dynamics& state, int step) {
-  ref::System system = input.system;
-  system.x = state.x;
-  system.y = state.y;
-  system.z = state.z;
-  const ref::Observables obs = ref::Compute(system);
-  const int n = ref::NumAtoms(system);
+void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dynamics& state,
+                int step);
+
+ThermoRow MakeRow(const SimulationInput& input, const ref::Dynamics& state, int step,
+                  double potential, const double* virial, bool metal) {
+  const int n = ref::NumAtoms(input.system);
   double kinetic = 0.0;
   for (int i = 0; i < n; ++i) {
     const double vx = state.vx[static_cast<size_t>(i)];
@@ -24,18 +25,96 @@ ThermoRow Sample(const SimulationInput& input, const ref::Dynamics& state, int s
     const double vz = state.vz[static_cast<size_t>(i)];
     kinetic += 0.5 * input.mass * (vx * vx + vy * vy + vz * vz);
   }
+  if (metal) kinetic *= kMetalMvv2e;
   const double dof = (n > 1) ? static_cast<double>(3 * n - 3) : static_cast<double>(3 * n);
-  const double volume = system.box[0] * system.box[1] * system.box[2];
+  const double boltz = metal ? kMetalBoltz : 1.0;
+  const double nktv2p = metal ? kMetalNktv2p : 1.0;
+  const double volume = input.system.box[0] * input.system.box[1] * input.system.box[2];
   ThermoRow row;
   row.step = step;
   row.time = input.timestep * static_cast<double>(step);
-  row.temperature = (2.0 * kinetic) / dof;
-  row.potential_per_atom = obs.potential_energy / static_cast<double>(n);
+  row.temperature = (2.0 * kinetic) / (dof * boltz);
+  row.potential_per_atom = potential / static_cast<double>(n);
   row.kinetic_per_atom = kinetic / static_cast<double>(n);
   row.total_per_atom = row.potential_per_atom + row.kinetic_per_atom;
-  const double trace = obs.virial[0] + obs.virial[1] + obs.virial[2];
-  row.pressure = (static_cast<double>(n) * row.temperature + trace / 3.0) / volume;
+  const double trace = virial[0] + virial[1] + virial[2];
+  row.pressure = nktv2p * (static_cast<double>(n) * boltz * row.temperature + trace / 3.0) / volume;
   return row;
+}
+
+ThermoRow Sample(const SimulationInput& input, const ref::Dynamics& state, int step) {
+  ref::System system = input.system;
+  system.x = state.x;
+  system.y = state.y;
+  system.z = state.z;
+  const ref::Observables obs = ref::Compute(system);
+  return MakeRow(input, state, step, obs.potential_energy, obs.virial, false);
+}
+
+double WrapMetal(double value, double length, int* image) {
+  double periods = std::floor(value / length);
+  int shift = static_cast<int>(periods);
+  value -= periods * length;
+  if (value >= length) {
+    value -= length;
+    ++shift;
+  } else if (value < 0.0) {
+    value += length;
+    --shift;
+  }
+  *image += shift;
+  return value;
+}
+
+AttentionResult MetalForces(EamFuncfl& potential, const SimulationInput& input,
+                            const ref::Dynamics& state) {
+  const int n = ref::NumAtoms(input.system);
+  return EvaluateAttention(potential, input.system.box, state.x.data(), state.y.data(),
+                           state.z.data(), input.system.type.data(), n);
+}
+
+void KickMetal(ref::Dynamics& state, const AttentionResult& force, double half) {
+  const int n = static_cast<int>(state.x.size());
+  for (int i = 0; i < n; ++i) {
+    state.vx[static_cast<size_t>(i)] += half * force.fx[static_cast<size_t>(i)];
+    state.vy[static_cast<size_t>(i)] += half * force.fy[static_cast<size_t>(i)];
+    state.vz[static_cast<size_t>(i)] += half * force.fz[static_cast<size_t>(i)];
+  }
+}
+
+std::vector<ThermoRow> RunMetal(const SimulationInput& input, std::ofstream& dump) {
+  if (input.langevin) throw std::runtime_error("langevin is not available for an eam run");
+  EamFuncfl potential(input.eam_path);
+  ref::System system = input.system;
+  ref::Dynamics state = ref::MakeDynamics(system, input.vx, input.vy, input.vz);
+  const double half = 0.5 * input.timestep * kMetalFtm2v / input.mass;
+  AttentionResult force = MetalForces(potential, input, state);
+  std::vector<ThermoRow> rows;
+  if (input.thermo_every > 0)
+    rows.push_back(MakeRow(input, state, 0, force.potential_energy, force.virial, true));
+  if (dump) WriteFrame(dump, input, state, 0);
+  for (int step = 1; step <= input.steps; ++step) {
+    KickMetal(state, force, half);
+    const int n = ref::NumAtoms(input.system);
+    for (int i = 0; i < n; ++i) {
+      state.x[static_cast<size_t>(i)] = WrapMetal(
+          state.x[static_cast<size_t>(i)] + input.timestep * state.vx[static_cast<size_t>(i)],
+          input.system.box[0], &state.imgx[static_cast<size_t>(i)]);
+      state.y[static_cast<size_t>(i)] = WrapMetal(
+          state.y[static_cast<size_t>(i)] + input.timestep * state.vy[static_cast<size_t>(i)],
+          input.system.box[1], &state.imgy[static_cast<size_t>(i)]);
+      state.z[static_cast<size_t>(i)] = WrapMetal(
+          state.z[static_cast<size_t>(i)] + input.timestep * state.vz[static_cast<size_t>(i)],
+          input.system.box[2], &state.imgz[static_cast<size_t>(i)]);
+    }
+    force = MetalForces(potential, input, state);
+    KickMetal(state, force, half);
+    if (input.thermo_every > 0 && step % input.thermo_every == 0) {
+      rows.push_back(MakeRow(input, state, step, force.potential_energy, force.virial, true));
+    }
+    if (dump && step % input.dump_every == 0) WriteFrame(dump, input, state, step);
+  }
+  return rows;
 }
 
 void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dynamics& state,
@@ -64,8 +143,6 @@ void WriteFrame(std::ofstream& out, const SimulationInput& input, const ref::Dyn
 std::vector<ThermoRow> RunReference(const SimulationInput& input, const std::string& dump_path) {
   if (input.steps < 0) throw std::runtime_error("run length must be non-negative");
   if (!(input.timestep > 0.0)) throw std::runtime_error("timestep must be positive");
-  ref::System system = input.system;
-  ref::Dynamics state = ref::MakeDynamics(system, input.vx, input.vy, input.vz);
   std::ofstream dump;
   if (input.dump_every > 0 && !dump_path.empty()) {
     dump.open(dump_path);
@@ -73,6 +150,9 @@ std::vector<ThermoRow> RunReference(const SimulationInput& input, const std::str
     dump.setf(std::ios::scientific);
     dump.precision(17);
   }
+  if (input.metal) return RunMetal(input, dump);
+  ref::System system = input.system;
+  ref::Dynamics state = ref::MakeDynamics(system, input.vx, input.vy, input.vz);
   std::vector<ThermoRow> rows;
   if (input.thermo_every > 0) rows.push_back(Sample(input, state, 0));
   if (dump) WriteFrame(dump, input, state, 0);

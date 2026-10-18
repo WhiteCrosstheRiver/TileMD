@@ -9,7 +9,11 @@ namespace tilemd {
 
 // LAMMPS metal units convert eV/Å and g/mol into Å/ps. Velocity Verlet uses
 // v += dt * f / m * kMetalFtm2v. Reduced LJ units omit this factor.
-inline constexpr double kMetalFtm2v = 1.0 / 1.0364269e-4;
+// kMetalBoltz is eV/K. kMetalNktv2p converts eV/Å^3 into bar.
+inline constexpr double kMetalMvv2e = 1.0364269e-4;
+inline constexpr double kMetalFtm2v = 1.0 / kMetalMvv2e;
+inline constexpr double kMetalBoltz = 8.617343e-5;
+inline constexpr double kMetalNktv2p = 1.602176637e6;
 
 // Single-element funcfl table, read and splined the way LAMMPS pair_style eam
 // does. Metal units: distance in Angstrom, energy in eV. Pass 0 sums the
