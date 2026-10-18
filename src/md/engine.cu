@@ -681,6 +681,17 @@ struct Engine::Impl {
   int npartial = 0;
   bool thermo_origin_written = false;
   bool leapfrog_ready = false;
+  bool tile_ready = false;
+  int* tile_type = nullptr;
+  int* tile_gid = nullptr;
+  int* tile_ci = nullptr;
+  int* tile_cj = nullptr;
+  int* tile_shift = nullptr;
+  int* tile_missing = nullptr;
+  int tile_ncluster = 0;
+  int tile_slot_cap = 0;
+  int tile_ci_cap = 0;
+  int tile_pair_cap = 0;
   std::vector<ThermoSample> drained;
 
   void Upload();
@@ -702,7 +713,9 @@ struct Engine::Impl {
   int BuildNeighbors(bool grow);
   void ComputeForce();
   GpuForces TileForces();
-  void FusedTileStep(float4* pos_cur, float4* pos_out);
+  bool TileListStale();
+  void RebuildTileCache(float4* pos_cur);
+  void LaunchTileStep(float4* pos_cur, float4* pos_out);
   void RunClusterTiles(int steps);
   GpuForces DownloadForces(int overflow);
 
@@ -720,6 +733,12 @@ struct Engine::Impl {
     cudaFree(pos);
     cudaFree(pos_next);
     cudaFree(xref);
+    cudaFree(tile_type);
+    cudaFree(tile_gid);
+    cudaFree(tile_ci);
+    cudaFree(tile_cj);
+    cudaFree(tile_shift);
+    cudaFree(tile_missing);
     cudaFree(fx);
     cudaFree(fy);
     cudaFree(fz);
@@ -1353,7 +1372,15 @@ GpuForces Engine::Impl::TileForces() {
   return out;
 }
 
-void Engine::Impl::FusedTileStep(float4* pos_cur, float4* pos_out) {
+bool Engine::Impl::TileListStale() {
+  if (!tile_ready || system.rebuild_every_step) return true;
+  DeviceStatus host{};
+  TILEMD_CHECK(cudaMemcpy(&host, status, sizeof(host), cudaMemcpyDeviceToHost));
+  const float trigger2 = static_cast<float>((system.skin * 0.5) * (system.skin * 0.5));
+  return host.max_disp2_bits > trigger2;
+}
+
+void Engine::Impl::RebuildTileCache(float4* pos_cur) {
   std::vector<double> hx(static_cast<size_t>(n));
   std::vector<double> hy(static_cast<size_t>(n));
   std::vector<double> hz(static_cast<size_t>(n));
@@ -1365,6 +1392,62 @@ void Engine::Impl::FusedTileStep(float4* pos_cur, float4* pos_out) {
     TILEMD_CHECK(cudaMemcpy(htype.data(), type, sizeof(int) * n, cudaMemcpyDeviceToHost));
   }
   double max_cut = 0.0;
+  for (const PairSpec& spec : system.pairs) max_cut = std::max(max_cut, spec.cutoff);
+  const ClusterGrid grid = BuildClusterGrid(system.box, hx.data(), hy.data(), hz.data(),
+                                            htype.data(), n, max_cut + system.skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  const int nslot = grid.ncluster * 8;
+  const int nci = grid.ncluster + 1;
+  const int npair = static_cast<int>(list.cj.size());
+  if (nslot > tile_slot_cap) {
+    cudaFree(tile_type);
+    cudaFree(tile_gid);
+    tile_type = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(nslot)));
+    tile_gid = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(nslot)));
+    tile_slot_cap = nslot;
+  }
+  if (nci > tile_ci_cap) {
+    cudaFree(tile_ci);
+    tile_ci = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(nci)));
+    tile_ci_cap = nci;
+  }
+  if (npair > tile_pair_cap) {
+    cudaFree(tile_cj);
+    cudaFree(tile_shift);
+    tile_cj = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(npair)));
+    tile_shift = static_cast<int*>(MustMalloc(sizeof(int) * static_cast<size_t>(npair)));
+    tile_pair_cap = npair;
+  }
+  if (tile_missing == nullptr) {
+    tile_missing = static_cast<int*>(MustMalloc(sizeof(int)));
+  }
+  if (nslot > 0) {
+    TILEMD_CHECK(
+        cudaMemcpy(tile_type, grid.type.data(), sizeof(int) * nslot, cudaMemcpyHostToDevice));
+    TILEMD_CHECK(
+        cudaMemcpy(tile_gid, grid.gid.data(), sizeof(int) * nslot, cudaMemcpyHostToDevice));
+  }
+  TILEMD_CHECK(cudaMemcpy(tile_ci, list.ci_start.data(), sizeof(int) * static_cast<size_t>(nci),
+                          cudaMemcpyHostToDevice));
+  if (npair > 0) {
+    TILEMD_CHECK(cudaMemcpy(tile_cj, list.cj.data(), sizeof(int) * npair, cudaMemcpyHostToDevice));
+    TILEMD_CHECK(
+        cudaMemcpy(tile_shift, list.shift.data(), sizeof(int) * npair, cudaMemcpyHostToDevice));
+  }
+  tile_ncluster = grid.ncluster;
+  tile_ready = true;
+  RefreshShadow<<<Grid(n), kBlock>>>(x, y, z, type, pos_cur, n);
+  CheckLaunch();
+  if (n > 0) {
+    TILEMD_CHECK(cudaMemcpy(xref, pos_cur, sizeof(float4) * n, cudaMemcpyDeviceToDevice));
+  }
+  DeviceStatus host{};
+  TILEMD_CHECK(cudaMemcpy(&host, status, sizeof(host), cudaMemcpyDeviceToHost));
+  host.max_disp2_bits = 0.f;
+  TILEMD_CHECK(cudaMemcpy(status, &host, sizeof(host), cudaMemcpyHostToDevice));
+}
+
+void Engine::Impl::LaunchTileStep(float4* pos_cur, float4* pos_out) {
   std::vector<LjPair> coeffs;
   coeffs.reserve(system.pairs.size());
   for (const PairSpec& spec : system.pairs) {
@@ -1375,17 +1458,14 @@ void Engine::Impl::FusedTileStep(float4* pos_cur, float4* pos_out) {
     row.sigma = spec.sigma;
     row.cutoff = spec.cutoff;
     coeffs.push_back(row);
-    max_cut = std::max(max_cut, spec.cutoff);
   }
   LjShift lj_shift = LjShift::None;
   if (system.shift == Shift::Energy) lj_shift = LjShift::Energy;
   if (system.shift == Shift::Force) lj_shift = LjShift::Force;
-  const ClusterGrid grid = BuildClusterGrid(system.box, hx.data(), hy.data(), hz.data(),
-                                            htype.data(), n, max_cut + system.skin);
-  const ClusterPairs list = BuildClusterPairs(grid);
-  RunFusedTileLeapfrog(grid, list, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift, x, y,
-                       z, vx, vy, vz, imgx, imgy, imgz, pos_cur, pos_out, xref, status,
-                       step_counter, system.dt, 1.0 / system.mass);
+  LaunchFusedTileDevice(tile_ncluster, tile_type, tile_gid, tile_ci, tile_cj, tile_shift,
+                        tile_missing, system.box, coeffs.data(), static_cast<int>(coeffs.size()),
+                        lj_shift, x, y, z, vx, vy, vz, imgx, imgy, imgz, pos_cur, pos_out, xref,
+                        status, step_counter, system.dt, 1.0 / system.mass);
   forces_ready = false;
 }
 
@@ -1408,7 +1488,8 @@ void Engine::Impl::RunClusterTiles(int steps) {
   float4* latest = pos;
   float4* other = pos_next;
   for (int step = 0; step < steps; ++step) {
-    FusedTileStep(latest, other);
+    if (TileListStale()) RebuildTileCache(latest);
+    LaunchTileStep(latest, other);
     std::swap(latest, other);
   }
   if (latest != pos) std::swap(pos, pos_next);

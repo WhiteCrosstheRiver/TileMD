@@ -30,4 +30,12 @@ void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, con
                           float4* pos_next, float4* xref, void* status, int* step_counter,
                           double dt, double inv_mass);
 
+// The cluster list is already on the device. Pair coordinates still come from pos_cur.
+void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const int* ci_start,
+                           const int* cj, const int* image, int* missing, const double* box,
+                           const LjPair* pairs, int npair, LjShift shift, double* x, double* y,
+                           double* z, double* vx, double* vy, double* vz, int* imgx, int* imgy,
+                           int* imgz, float4* pos_cur, float4* pos_next, float4* xref, void* status,
+                           int* step_counter, double dt, double inv_mass);
+
 }  // namespace tilemd

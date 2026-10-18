@@ -529,4 +529,77 @@ void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, con
   if (missing_host) throw std::invalid_argument("missing pair coefficient");
 }
 
+void LaunchFusedTileDevice(int ncluster, const int* type, const int* gid, const int* ci_start,
+                           const int* cj, const int* image, int* missing, const double* box,
+                           const LjPair* pairs, int npair, LjShift lj_shift, double* atom_x,
+                           double* atom_y, double* atom_z, double* vx, double* vy, double* vz,
+                           int* imgx, int* imgy, int* imgz, float4* pos_cur, float4* pos_next,
+                           float4* xref, void* status, int* step_counter, double dt,
+                           double inv_mass) {
+  if (npair < 1) throw std::invalid_argument("at least one pair coefficient is required");
+  if (!(dt > 0.0) || !(inv_mass > 0.0)) {
+    throw std::invalid_argument("dt and inverse mass must be positive");
+  }
+  if (ncluster <= 0) return;
+  TileRow rows[kTileTypes * kTileTypes] = {};
+  for (int p = 0; p < npair; ++p) {
+    const LjPair& coeff = pairs[p];
+    if (coeff.type_i < 0 || coeff.type_j < 0 || coeff.type_i >= kTileTypes ||
+        coeff.type_j >= kTileTypes) {
+      throw std::invalid_argument("pair type is outside 0..7");
+    }
+    if (!(coeff.cutoff > 0.0) || !(coeff.sigma > 0.0)) {
+      throw std::invalid_argument("sigma and cutoff must be positive");
+    }
+    auto fill = [&](int ti, int tj) {
+      TileRow& row = rows[ti * kTileTypes + tj];
+      row.defined = 1;
+      row.sigma2 = coeff.sigma * coeff.sigma;
+      row.eps4 = 4.0 * coeff.epsilon;
+      row.eps24 = 24.0 * coeff.epsilon;
+      row.rc = coeff.cutoff;
+      row.rc2 = coeff.cutoff * coeff.cutoff;
+      const double inv_rc2 = 1.0 / row.rc2;
+      const double sr2 = row.sigma2 * inv_rc2;
+      const double sr6 = sr2 * sr2 * sr2;
+      const double u_c = row.eps4 * sr6 * (sr6 - 1.0);
+      row.s_rc = row.eps24 * inv_rc2 * sr6 * (2.0 * sr6 - 1.0);
+      row.u_shift = (lj_shift == LjShift::None) ? 0.0 : u_c;
+    };
+    fill(coeff.type_i, coeff.type_j);
+    if (coeff.type_i != coeff.type_j) fill(coeff.type_j, coeff.type_i);
+  }
+  const int shift_code = static_cast<int>(lj_shift);
+  Check(cudaMemcpyToSymbol(c_tile_rows, rows, sizeof(rows)));
+  Check(cudaMemcpyToSymbol(c_tile_box, box, sizeof(double) * 3));
+  Check(cudaMemcpyToSymbol(c_tile_shift, &shift_code, sizeof(shift_code)));
+  Check(cudaMemset(missing, 0, sizeof(int)));
+
+  TileIntegrate step;
+  step.x = atom_x;
+  step.y = atom_y;
+  step.z = atom_z;
+  step.vx = vx;
+  step.vy = vy;
+  step.vz = vz;
+  step.imgx = imgx;
+  step.imgy = imgy;
+  step.imgz = imgz;
+  step.pos_cur = pos_cur;
+  step.pos_next = pos_next;
+  step.xref = xref;
+  step.status = static_cast<DeviceStatus*>(status);
+  step.step_counter = step_counter;
+  step.dt = dt;
+  step.inv_mass = inv_mass;
+  TileForceKernel<true><<<ncluster, 32>>>(
+      nullptr, nullptr, nullptr, type, gid, ci_start, cj, image, nullptr, nullptr, nullptr, nullptr,
+      nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, ncluster, missing, step);
+  Check(cudaGetLastError());
+  Check(cudaDeviceSynchronize());
+  int missing_host = 0;
+  Check(cudaMemcpy(&missing_host, missing, sizeof(int), cudaMemcpyDeviceToHost));
+  if (missing_host) throw std::invalid_argument("missing pair coefficient");
+}
+
 }  // namespace tilemd

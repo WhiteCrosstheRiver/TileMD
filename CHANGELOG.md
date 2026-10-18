@@ -18,4 +18,4 @@
 - M5 GPU tile force: one warp per cluster, selectable beside the atom-neighbor engine. The cluster list is still built on the host.
 - M5 tile-efficiency measurement on `melt_4000` and the 32k melt.
 - M6 CPU leapfrog integrator. Over 100 steps it matches velocity Verlet to round-off on the double-precision oracle.
-- M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The cluster list is still built on the host, and this kernel has not been launched.
+- M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded, and this kernel has not been launched.
