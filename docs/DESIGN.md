@@ -28,6 +28,10 @@ The CPU builder in `src/neighbor/cluster_list.cpp` is the M5 list. Columns lie o
 
 `src/md/tile_force.cu` is the matching GPU kernel: one warp per i-cluster, lane `i_local + 8 * j_sub`. Each group of four j-clusters is broadcast with warp shuffles, and the four lane partials are added in j-sub order. `HostSystem::use_cluster_tiles` selects this path for `ComputeForces`. `Run` on that path is leapfrog: one kernel reads pair coordinates from the current `pos4` buffer, updates the owning atom's position and velocity, then writes the other `pos4` buffer. The cluster list is still built on the host from the double-precision positions. It is kept until `rebuild_every_step` is set or an atom has moved more than half the skin from the reference stored at the last rebuild. The default engine remains the atom-neighbor list and velocity Verlet. Tile thermo and a device-side cluster rebuild are not on this path.
 
+## Input
+
+`src/io/input.cpp` reads the Appendix D key-value file. `box fcc nx ny nz density` builds the four-atom cell at that number density. `structure` reads positions from an extended XYZ file, resolved from the input file's directory. `velocity T seed` draws a Gaussian of variance `T/m` from Philox4x32-10 with counter `(atom, 0, 0, 0)` and key `(seed, 0)`, then subtracts the mean so the total momentum is zero. `ensemble langevin T gamma seed` fills the BAOAB parameters. The `tilemd` executable still only prints its version; it does not run the file yet.
+
 ## CPU reference
 
 The M2 oracle in `reference/lj_reference.cpp` is the double-precision pair loop from PLAN.md section 4.1. It visits every ordered pair. Minimum image uses `std::rint`, the double-precision form of the `rintf` rule in decision D10. Per-atom energy is half the pair energy, and the virial includes the full-list factor of one half. `lj_shift = force` subtracts `U'(r_c)` so both the energy and the force vanish at the cutoff. Fixtures with `N <= 4000` use this brute-force loop. A cell list for larger systems is not in this milestone.

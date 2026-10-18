@@ -10,7 +10,7 @@
 
 | Milestone | Branch | State | Gate | PR | Notes |
 |---|---|---|---|---|---|
-| M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. GitHub remote not created (`gh` is not installed). |
+| M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. The Appendix D input parser reads an fcc melt on the CPU. `tilemd` does not run that file yet. GitHub remote not created (`gh` is not installed). |
 | M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | not started | — | | |
 | M2 CPU reference oracle | `m2-cpu-reference` | in progress | G1-ref | | Local gate passed (LAMMPS 22 Jul 2025 Update 4, CPU). No GitHub PR (`gh` is not installed). |
 | M3 GPU v0 (correct, simple) | `m3-gpu-v0` | in progress | G1 | | Local T1, T2, T3, T5, T6, T7, and T8 passed on an RTX 3050 against CPU LAMMPS. T5 L1 is 0.00147. T4 is still running. No KOKKOS package and no GitHub PR (`gh` is not installed). |
