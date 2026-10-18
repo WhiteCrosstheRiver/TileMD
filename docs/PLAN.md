@@ -14,7 +14,7 @@
 | M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | not started | — | | |
 | M2 CPU reference oracle | `m2-cpu-reference` | in progress | G1-ref | | Local gate passed (LAMMPS 22 Jul 2025 Update 4, CPU). No GitHub PR (`gh` is not installed). |
 | M3 GPU v0 (correct, simple) | `m3-gpu-v0` | in progress | G1 | | Local T1, T2, T3, T6, T7, and T8 passed on an RTX 3050 against CPU LAMMPS. T4 and T5 are not run. No KOKKOS package and no GitHub PR (`gh` is not installed). |
-| M4 Performance foundation | `m4-perf-foundation` | in progress | G2, G3 | | Spatial sort, device rebuild, a 50-step graph, device thermo, and launch-bounds/`__ldg` are in. The block-size sweep and GPU tests wait until this GPU is free. |
+| M4 Performance foundation | `m4-perf-foundation` | in progress | G2, G3 | | Spatial sort, device rebuild, a 50-step graph, conditional rebuild, device thermo, and launch-bounds/`__ldg` are in. The block-size sweep and GPU tests wait until this GPU is free. |
 | M5 Cluster-pair tiles (SIMT) | `m5-cluster-tiles` | not started | G2+ | | |
 | M6 Fused single-kernel timestep | `m6-fused-step` | not started | G2+, G3+ | | |
 | M7 Tensor-core pair-attention tile | `m7-tensor-core` | not started | G4 | | |

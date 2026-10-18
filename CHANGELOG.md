@@ -12,3 +12,4 @@
 - M4 CUDA graph of 50 steps, with a segment snapshot that restores and grows the list on overflow.
 - M4 energy and virial only on thermo steps, reduced on device into a ring drained at segment boundaries.
 - M4 launch bounds and read-only position loads on the force and neighbor kernels. Block size stays 128.
+- M4 conditional graph node around the neighbor rebuild, with the early-exit kernels kept as the fallback.

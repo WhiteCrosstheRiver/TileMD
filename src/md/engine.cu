@@ -388,6 +388,11 @@ __global__ void __launch_bounds__(kBlock)
   if (!isfinite(ax) || !isfinite(ay) || !isfinite(az)) atomicExch(&status->nan_detected, 1);
 }
 
+__global__ void PublishRebuild(cudaGraphConditionalHandle handle, const DeviceStatus* status) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  cudaGraphSetConditional(handle, status->need_rebuild ? 1u : 0u);
+}
+
 __global__ void SetEvFlag(int* ev_flag, const int* step) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
   int every = c_thermo_every;
@@ -680,6 +685,10 @@ struct Engine::Impl {
   void ApplySpatialOrder();
   void QueueRebuild(cudaStream_t stream);
   void LaunchStep(cudaStream_t stream);
+  void LaunchPrefix(cudaStream_t stream);
+  void LaunchSuffix(cudaStream_t stream);
+  bool CaptureConditional(cudaStream_t stream, int count, cudaGraph_t* graph,
+                          cudaGraphExec_t* exec);
   void Snapshot(cudaStream_t stream);
   void RestoreSnapshot();
   void Capture(cudaStream_t stream, int count, cudaGraph_t* graph, cudaGraphExec_t* exec);
@@ -1035,9 +1044,9 @@ void Engine::Impl::ApplySpatialOrder() {
 
 void Engine::Impl::QueueRebuild(cudaStream_t stream) {
   // The host does not read the flag. Kernels that would change atom order or
-  // the list return immediately when need_rebuild is clear. CUB has no such
-  // prologue, so the sort is queued every step until a conditional graph node
-  // can skip it. Its output is ignored unless the flag is set.
+  // the list return immediately when need_rebuild is clear. That is the
+  // fallback when the step is not inside a conditional graph node. CUB has no
+  // prologue of its own; the conditional node is what skips the sort.
   const int* gate = &status->need_rebuild;
   CellKeyKernel<<<Grid(n), kBlock, 0, stream>>>(pos, keys, indices, n, gate);
   TILEMD_CHECK(cub::DeviceRadixSort::SortPairs(cub_temp, cub_bytes, keys, sorted_keys, indices,
@@ -1077,7 +1086,7 @@ void Engine::Impl::QueueRebuild(cudaStream_t stream) {
   AccountRebuild<<<1, 1, 0, stream>>>(status);
 }
 
-void Engine::Impl::LaunchStep(cudaStream_t stream) {
+void Engine::Impl::LaunchPrefix(cudaStream_t stream) {
   const double dt = system.dt;
   const double inv_mass = 1.0 / system.mass;
   KickDrift<<<Grid(n), kBlock, 0, stream>>>(x, y, z, vx, vy, vz, fx, fy, fz, imgx, imgy, imgz, n,
@@ -1086,7 +1095,11 @@ void Engine::Impl::LaunchStep(cudaStream_t stream) {
   ResetDisplacement<<<1, 1, 0, stream>>>(status);
   DispKernel<<<Grid(n), kBlock, 0, stream>>>(pos, xref, n, status);
   DecideRebuild<<<1, 1, 0, stream>>>(status);
-  QueueRebuild(stream);
+}
+
+void Engine::Impl::LaunchSuffix(cudaStream_t stream) {
+  const double dt = system.dt;
+  const double inv_mass = 1.0 / system.mass;
   SetEvFlag<<<1, 1, 0, stream>>>(ev_flag, step_counter);
   ForceKernel<<<Grid(n), kBlock, 0, stream>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy,
                                               wzz, wxy, wxz, wyz, n, status, ev_flag);
@@ -1096,6 +1109,12 @@ void Engine::Impl::LaunchStep(cudaStream_t stream) {
   FinishThermo<<<1, 1, 0, stream>>>(thermo_partial, npartial, thermo_ring, kThermoRing,
                                     thermo_count, step_counter, ev_flag, 1, status);
   IncrementStep<<<1, 1, 0, stream>>>(step_counter);
+}
+
+void Engine::Impl::LaunchStep(cudaStream_t stream) {
+  LaunchPrefix(stream);
+  QueueRebuild(stream);
+  LaunchSuffix(stream);
 }
 
 void Engine::Impl::Snapshot(cudaStream_t stream) {
@@ -1134,8 +1153,95 @@ void Engine::Impl::RestoreSnapshot() {
   CheckLaunch();
 }
 
+bool Engine::Impl::CaptureConditional(cudaStream_t stream, int count, cudaGraph_t* graph,
+                                      cudaGraphExec_t* exec) {
+  cudaGraph_t built = nullptr;
+  if (cudaGraphCreate(&built, 0) != cudaSuccess) return false;
+  std::vector<cudaGraphConditionalHandle> handles(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    if (cudaGraphConditionalHandleCreate(&handles[static_cast<size_t>(i)], built, 0,
+                                         cudaGraphCondAssignDefault) != cudaSuccess) {
+      cudaGraphDestroy(built);
+      return false;
+    }
+  }
+  if (cudaStreamBeginCaptureToGraph(stream, built, nullptr, nullptr, 0,
+                                    cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+    cudaGraphDestroy(built);
+    return false;
+  }
+  cudaStream_t body = nullptr;
+  if (cudaStreamCreate(&body) != cudaSuccess) {
+    cudaGraph_t junk = nullptr;
+    cudaStreamEndCapture(stream, &junk);
+    cudaGraphDestroy(built);
+    return false;
+  }
+  bool ok = true;
+  for (int i = 0; i < count && ok; ++i) {
+    LaunchPrefix(stream);
+    PublishRebuild<<<1, 1, 0, stream>>>(handles[static_cast<size_t>(i)], status);
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    cudaGraph_t captured = nullptr;
+    const cudaGraphNode_t* deps = nullptr;
+    size_t ndeps = 0;
+    if (cudaStreamGetCaptureInfo(stream, &capture_status, nullptr, &captured, &deps, nullptr,
+                                 &ndeps) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    cudaGraphNodeParams params{};
+    params.type = cudaGraphNodeTypeConditional;
+    params.conditional.handle = handles[static_cast<size_t>(i)];
+    params.conditional.type = cudaGraphCondTypeIf;
+    params.conditional.size = 1;
+    cudaGraphNode_t cond = nullptr;
+    if (cudaGraphAddNode(&cond, captured, deps, nullptr, ndeps, &params) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    if (cudaStreamUpdateCaptureDependencies(stream, &cond, nullptr, 1,
+                                            cudaStreamSetCaptureDependencies) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    cudaGraph_t body_graph = params.conditional.phGraph_out[0];
+    if (cudaStreamBeginCaptureToGraph(body, body_graph, nullptr, nullptr, 0,
+                                      cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+      ok = false;
+      break;
+    }
+    QueueRebuild(body);
+    cudaGraph_t finished_body = nullptr;
+    if (cudaStreamEndCapture(body, &finished_body) != cudaSuccess) ok = false;
+    if (ok) LaunchSuffix(stream);
+  }
+  cudaStreamDestroy(body);
+  cudaGraph_t ended = nullptr;
+  cudaError_t end = cudaStreamEndCapture(stream, &ended);
+  if (!ok || end != cudaSuccess) {
+    if (ended && ended != built) cudaGraphDestroy(ended);
+    cudaGraphDestroy(built);
+    return false;
+  }
+  if (cudaGraphInstantiate(exec, built, 0) != cudaSuccess) {
+    cudaGraphDestroy(built);
+    return false;
+  }
+  *graph = built;
+  return true;
+}
+
 void Engine::Impl::Capture(cudaStream_t stream, int count, cudaGraph_t* graph,
                            cudaGraphExec_t* exec) {
+  cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+  cudaStreamIsCapturing(stream, &capture_status);
+  if (capture_status != cudaStreamCaptureStatusNone) {
+    cudaGraph_t junk = nullptr;
+    cudaStreamEndCapture(stream, &junk);
+    if (junk) cudaGraphDestroy(junk);
+  }
+  if (CaptureConditional(stream, count, graph, exec)) return;
   TILEMD_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
   for (int i = 0; i < count; ++i) LaunchStep(stream);
   TILEMD_CHECK(cudaStreamEndCapture(stream, graph));
