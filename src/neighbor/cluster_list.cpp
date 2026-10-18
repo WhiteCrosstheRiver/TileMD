@@ -151,41 +151,20 @@ ClusterGrid BuildClusterGrid(const double* box, const double* x, const double* y
   grid.hi_y.assign(static_cast<size_t>(grid.ncluster), 0.0);
   grid.hi_z.assign(static_cast<size_t>(grid.ncluster), 0.0);
   for (int cluster = 0; cluster < grid.ncluster; ++cluster) {
+    ClusterBox box;
     bool any = false;
-    double lo_x = 0.0;
-    double lo_y = 0.0;
-    double lo_z = 0.0;
-    double hi_x = 0.0;
-    double hi_y = 0.0;
-    double hi_z = 0.0;
     for (int local = 0; local < kClusterSize; ++local) {
       const int slot = cluster * kClusterSize + local;
       if (grid.type[static_cast<size_t>(slot)] == kMaskType) continue;
-      const double sx = grid.x[static_cast<size_t>(slot)];
-      const double sy = grid.y[static_cast<size_t>(slot)];
-      const double sz = grid.z[static_cast<size_t>(slot)];
-      if (!any) {
-        lo_x = hi_x = sx;
-        lo_y = hi_y = sy;
-        lo_z = hi_z = sz;
-        any = true;
-      } else {
-        lo_x = std::min(lo_x, sx);
-        lo_y = std::min(lo_y, sy);
-        lo_z = std::min(lo_z, sz);
-        hi_x = std::max(hi_x, sx);
-        hi_y = std::max(hi_y, sy);
-        hi_z = std::max(hi_z, sz);
-      }
+      IncludeInBox(&box, &any, grid.x[static_cast<size_t>(slot)], grid.y[static_cast<size_t>(slot)],
+                   grid.z[static_cast<size_t>(slot)]);
     }
-    if (any) {
-      grid.lo_x[static_cast<size_t>(cluster)] = lo_x;
-      grid.lo_y[static_cast<size_t>(cluster)] = lo_y;
-      grid.lo_z[static_cast<size_t>(cluster)] = lo_z;
-      grid.hi_x[static_cast<size_t>(cluster)] = hi_x;
-      grid.hi_y[static_cast<size_t>(cluster)] = hi_y;
-      grid.hi_z[static_cast<size_t>(cluster)] = hi_z;
-    }
+    grid.lo_x[static_cast<size_t>(cluster)] = box.lo_x;
+    grid.lo_y[static_cast<size_t>(cluster)] = box.lo_y;
+    grid.lo_z[static_cast<size_t>(cluster)] = box.lo_z;
+    grid.hi_x[static_cast<size_t>(cluster)] = box.hi_x;
+    grid.hi_y[static_cast<size_t>(cluster)] = box.hi_y;
+    grid.hi_z[static_cast<size_t>(cluster)] = box.hi_z;
   }
   return grid;
 }

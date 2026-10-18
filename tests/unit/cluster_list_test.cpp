@@ -56,6 +56,23 @@ void ExpectDeviceOrder(const double* box, const double* x, const double* y, cons
   EXPECT_EQ(slots.ncluster, grid.ncluster);
   EXPECT_EQ(slots.type, grid.type);
   EXPECT_EQ(slots.gid, grid.gid);
+  for (int cluster = 0; cluster < grid.ncluster; ++cluster) {
+    tilemd::ClusterBox bounds;
+    bool any = false;
+    for (int local = 0; local < tilemd::kClusterSize; ++local) {
+      const int slot = cluster * tilemd::kClusterSize + local;
+      if (grid.type[static_cast<size_t>(slot)] == tilemd::kMaskType) continue;
+      const int atom = grid.gid[static_cast<size_t>(slot)];
+      tilemd::IncludeInBox(&bounds, &any, tilemd::WrapCoord(x[atom], box[0]),
+                           tilemd::WrapCoord(y[atom], box[1]), tilemd::WrapCoord(z[atom], box[2]));
+    }
+    EXPECT_DOUBLE_EQ(grid.lo_x[static_cast<size_t>(cluster)], bounds.lo_x);
+    EXPECT_DOUBLE_EQ(grid.lo_y[static_cast<size_t>(cluster)], bounds.lo_y);
+    EXPECT_DOUBLE_EQ(grid.lo_z[static_cast<size_t>(cluster)], bounds.lo_z);
+    EXPECT_DOUBLE_EQ(grid.hi_x[static_cast<size_t>(cluster)], bounds.hi_x);
+    EXPECT_DOUBLE_EQ(grid.hi_y[static_cast<size_t>(cluster)], bounds.hi_y);
+    EXPECT_DOUBLE_EQ(grid.hi_z[static_cast<size_t>(cluster)], bounds.hi_z);
+  }
 }
 
 }  // namespace
@@ -78,6 +95,11 @@ TEST(ClusterList, DeviceSortKeyMatchesTheHostGrid) {
   ASSERT_GE(wrapped.gid.size(), 2u);
   EXPECT_EQ(wrapped.gid[0], 1);
   EXPECT_EQ(wrapped.gid[1], 0);
+  const tilemd::ClusterGrid wrapped_grid =
+      tilemd::BuildClusterGrid(box, wrap_x, wrap_y, wrap_z, type2, 2, 1.0);
+  ASSERT_EQ(wrapped_grid.ncluster, 1);
+  EXPECT_DOUBLE_EQ(wrapped_grid.lo_z[0], 1.0);
+  EXPECT_DOUBLE_EQ(wrapped_grid.hi_z[0], 9.0);
 
   const double neg0 = -0.0;
   const double pos0 = 0.0;

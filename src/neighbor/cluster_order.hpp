@@ -54,6 +54,32 @@ TILEMD_HD inline int ShiftIndex(int sx, int sy, int sz) {
   return (sx + 1) + 3 * ((sy + 1) + 3 * (sz + 1));
 }
 
+// Empty clusters keep lo > hi. A wrapped coordinate is included only after `WrapCoord`.
+struct ClusterBox {
+  double lo_x = 1.0;
+  double lo_y = 1.0;
+  double lo_z = 1.0;
+  double hi_x = 0.0;
+  double hi_y = 0.0;
+  double hi_z = 0.0;
+};
+
+TILEMD_HD inline void IncludeInBox(ClusterBox* box, bool* any, double x, double y, double z) {
+  if (!*any) {
+    box->lo_x = box->hi_x = x;
+    box->lo_y = box->hi_y = y;
+    box->lo_z = box->hi_z = z;
+    *any = true;
+    return;
+  }
+  if (x < box->lo_x) box->lo_x = x;
+  if (y < box->lo_y) box->lo_y = y;
+  if (z < box->lo_z) box->lo_z = z;
+  if (x > box->hi_x) box->hi_x = x;
+  if (y > box->hi_y) box->hi_y = y;
+  if (z > box->hi_z) box->hi_z = z;
+}
+
 TILEMD_HD inline double AxisGap(double a_lo, double a_hi, double b_lo, double b_hi) {
   if (a_hi < b_lo) return b_lo - a_hi;
   if (b_hi < a_lo) return a_lo - b_hi;

@@ -88,49 +88,21 @@ __global__ void WriteTileSlots(const double* x, const double* y, const double* z
     for (int local = 0; local < nclus; ++local) {
       const int cluster = cluster_cursor + local;
       cluster_column[cluster] = column;
+      ClusterBox box;
       bool any = false;
-      double lx = 0.0;
-      double ly = 0.0;
-      double lz = 0.0;
-      double hx = 0.0;
-      double hy = 0.0;
-      double hz = 0.0;
       for (int s = 0; s < kClusterSize; ++s) {
         const int slot = cluster * kClusterSize + s;
         if (slot_type[slot] == kMaskType) continue;
         const int atom = slot_gid[slot];
-        const double sx = WrapCoord(x[atom], box_x);
-        const double sy = WrapCoord(y[atom], box_y);
-        const double sz = WrapCoord(z[atom], box_z);
-        if (!any) {
-          lx = hx = sx;
-          ly = hy = sy;
-          lz = hz = sz;
-          any = true;
-        } else {
-          if (sx < lx) lx = sx;
-          if (sy < ly) ly = sy;
-          if (sz < lz) lz = sz;
-          if (sx > hx) hx = sx;
-          if (sy > hy) hy = sy;
-          if (sz > hz) hz = sz;
-        }
+        IncludeInBox(&box, &any, WrapCoord(x[atom], box_x), WrapCoord(y[atom], box_y),
+                     WrapCoord(z[atom], box_z));
       }
-      if (!any) {
-        lo_x[cluster] = 1.0;
-        lo_y[cluster] = 1.0;
-        lo_z[cluster] = 1.0;
-        hi_x[cluster] = 0.0;
-        hi_y[cluster] = 0.0;
-        hi_z[cluster] = 0.0;
-      } else {
-        lo_x[cluster] = lx;
-        lo_y[cluster] = ly;
-        lo_z[cluster] = lz;
-        hi_x[cluster] = hx;
-        hi_y[cluster] = hy;
-        hi_z[cluster] = hz;
-      }
+      lo_x[cluster] = box.lo_x;
+      lo_y[cluster] = box.lo_y;
+      lo_z[cluster] = box.lo_z;
+      hi_x[cluster] = box.hi_x;
+      hi_y[cluster] = box.hi_y;
+      hi_z[cluster] = box.hi_z;
     }
     cluster_cursor += nclus;
   }
