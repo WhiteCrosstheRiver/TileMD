@@ -283,6 +283,38 @@ TEST(Fp32Walk, SkinRebuildsOnlyAfterHalfTheSkin) {
   EXPECT_LT(x[0], length);
 }
 
+TEST(Fp32Walk, RebuildStoresMortonSlotOrder) {
+  std::vector<double> x, y, z;
+  double length = 0;
+  MakeFcc(4, &x, &y, &z, &length);
+  const int n = static_cast<int>(x.size());
+  std::vector<int> shuffled(n);
+  std::iota(shuffled.begin(), shuffled.end(), 0);
+  std::mt19937 rng(20261019);
+  std::shuffle(shuffled.begin(), shuffled.end(), rng);
+  tilemd::ApplyOrder(&x, shuffled);
+  tilemd::ApplyOrder(&y, shuffled);
+  tilemd::ApplyOrder(&z, shuffled);
+  std::vector<double> vx(n, 0.0), vy(n, 0.0), vz(n, 0.0);
+  std::vector<int> ix(n, 0), iy(n, 0), iz(n);
+  std::iota(iz.begin(), iz.end(), 0);
+  vx[0] = 800.0;
+  const double box[3] = {length, length, length};
+  const tilemd::Fp32SkinStats stats =
+      tilemd::HostFp32SkinSteps(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                                ix.data(), iy.data(), iz.data(), n, UnitLj(), 0.005, 1.0, 0.3, 1);
+  EXPECT_EQ(stats.rebuilds, 1);
+  const std::vector<int> order = tilemd::MortonOrder(box, x.data(), y.data(), z.data(), n, 2.8);
+  for (int i = 0; i < n; ++i) {
+    EXPECT_EQ(order[i], i) << i;
+    EXPECT_GE(x[i], 0.0);
+    EXPECT_LT(x[i], length);
+  }
+  const int moved = static_cast<int>(std::find(iz.begin(), iz.end(), 0) - iz.begin());
+  ASSERT_LT(moved, n);
+  EXPECT_GT(std::abs(vx[moved]), 100.0);
+}
+
 TEST(Fp32Walk, CellListSeesThePeriodicFace) {
   const double box[3] = {10, 10, 10};
   const double x[2] = {0.001, 9.999};
