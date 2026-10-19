@@ -100,6 +100,9 @@ inline Fp32Walk HostFp32Force(const double* box, const double* x, const double* 
 struct Fp32SkinStats {
   int rebuilds = 0;
   float max_disp2 = 0.f;
+  // The list the next step would use. It stays valid for rc while the
+  // displacement is inside half the skin.
+  CellList list;
 };
 
 // One thread's worth of the fused step: FP32 force, kick-drift, then a new
@@ -174,6 +177,7 @@ inline Fp32SkinStats HostFp32SkinSteps(const double* box, double* x, double* y, 
       ++stats.rebuilds;
     }
   }
+  stats.list = std::move(list);
   return stats;
 }
 

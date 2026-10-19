@@ -315,6 +315,68 @@ TEST(Fp32Walk, RebuildStoresMortonSlotOrder) {
   EXPECT_GT(std::abs(vx[moved]), 100.0);
 }
 
+void ExpectForceMatches(const double* box, const std::vector<double>& x,
+                        const std::vector<double>& y, const std::vector<double>& z,
+                        const tilemd::CellList& list) {
+  const int n = static_cast<int>(x.size());
+  const tilemd::Fp32Walk got = tilemd::HostFp32Force(box, x.data(), y.data(), z.data(),
+                                                     list.nn.data(), list.nl.data(), n, UnitLj());
+  tilemd::ref::System system;
+  system.box[0] = box[0];
+  system.box[1] = box[1];
+  system.box[2] = box[2];
+  system.type.assign(n, 0);
+  system.x = x;
+  system.y = y;
+  system.z = z;
+  system.pairs = {tilemd::ref::PairCoeff{}};
+  const tilemd::ref::Observables oracle = tilemd::ref::Compute(system);
+  tilemd::ref::Observables fp32;
+  fp32.fx.assign(got.fx.begin(), got.fx.end());
+  fp32.fy.assign(got.fy.begin(), got.fy.end());
+  fp32.fz.assign(got.fz.begin(), got.fz.end());
+  fp32.potential_energy = got.potential_energy;
+  for (int c = 0; c < 6; ++c) fp32.virial[c] = got.virial[c];
+  const tilemd::ref::T1v2 gate = tilemd::ref::CompareT1v2(fp32, oracle);
+  EXPECT_TRUE(gate.pass) << gate.force_rms_rel << " " << gate.force_max_rel << " "
+                         << gate.energy_rel << " " << gate.virial_rel;
+}
+
+TEST(Fp32Walk, SkinKeepsAPairThatDriftsInsideTheCutoff) {
+  const double box[3] = {20, 20, 20};
+  std::vector<double> x = {5.0, 7.55};
+  std::vector<double> y = {5.0, 5.0};
+  std::vector<double> z = {5.0, 5.0};
+  std::vector<double> vx = {0.0, -20.0};
+  std::vector<double> vy = {0.0, 0.0};
+  std::vector<double> vz = {0.0, 0.0};
+  std::vector<int> ix = {0, 0};
+  std::vector<int> iy = {0, 0};
+  std::vector<int> iz = {0, 0};
+  const tilemd::Fp32SkinStats kept =
+      tilemd::HostFp32SkinSteps(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                                ix.data(), iy.data(), iz.data(), 2, UnitLj(), 0.005, 1.0, 0.3, 1);
+  EXPECT_EQ(kept.rebuilds, 0);
+  ExpectForceMatches(box, x, y, z, kept.list);
+
+  x = {5.0, 7.85};
+  y = {5.0, 5.0};
+  z = {5.0, 5.0};
+  vx = {0.0, -100.0};
+  vy = {0.0, 0.0};
+  vz = {0.0, 0.0};
+  ix = {0, 0};
+  iy = {0, 0};
+  iz = {0, 0};
+  const tilemd::Fp32SkinStats rebuilt =
+      tilemd::HostFp32SkinSteps(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                                ix.data(), iy.data(), iz.data(), 2, UnitLj(), 0.005, 1.0, 0.3, 1);
+  EXPECT_EQ(rebuilt.rebuilds, 1);
+  EXPECT_EQ(rebuilt.list.nn[0], 1);
+  EXPECT_EQ(rebuilt.list.nn[1], 1);
+  ExpectForceMatches(box, x, y, z, rebuilt.list);
+}
+
 TEST(Fp32Walk, CellListSeesThePeriodicFace) {
   const double box[3] = {10, 10, 10};
   const double x[2] = {0.001, 9.999};
