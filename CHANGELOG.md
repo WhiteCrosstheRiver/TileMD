@@ -30,6 +30,7 @@
 - M6 fused leapfrog launch. On a 125-atom lattice, 100 steps stay within 2.8e-9 of the CPU leapfrog, both when the list is rebuilt every step and when two graphs of 50 steps are launched.
 - M6 fused device thermo. On that lattice, steps 0, 2, 4, 6, and 8 match the CPU leapfrog to 7.1e-7 in virial, including one captured graph.
 - M4 force-kernel block sweep on an RTX 3050. Block 128 is faster than 64 and 256. A 200-step run of the 32k melt reaches 4.47e6 atom-steps/s. G2 and G3 stay unclaimed.
+- M4 graph-unroll sweep. Widths 1, 10, 50, and 200 were timed on an RTX 3050. On the 32k melt the medians are 4.53e6, 4.57e6, 4.55e6, and 4.36e6 atom-steps/s. Widths 1 and 200 match bitwise over 200 steps. The default stays 50.
 - M5/M6 path rates on an RTX 3050. The fused cluster-tile run is 0.31× the atom-neighbor engine at 32k and 0.29× at 256k, so the speed gates are not met. One forces-only tile launch moved 730 bytes/atom through DRAM.
 - M8 LJ attention overhead. On the 32k melt, two medians of twenty kernel launches put the generic kernel 12.7% and 7.8% behind the specialized tile force kernel, outside the 5% gate.
 - M6 fused-kernel profile. One `TileForceKernel<1>` launch on the 32k melt moved 30.10 Mbyte, 941 bytes/atom, at 86% of peak SM throughput. The grid is the atom count.

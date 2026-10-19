@@ -1353,3 +1353,54 @@ TEST(GpuLj, TailGraphMatchesTheCpu) {
   EXPECT_LT(max_x, 1.0e-6);
   EXPECT_LT(max_v, 1.0e-6);
 }
+
+// PLAN M4 sweeps the captured group length. The timed Run includes the capture.
+// Clocks are not locked, so the test records the rates and does not rank them.
+TEST(GpuLj, GraphUnrollSweep) {
+  if (!HasGpu()) GTEST_SKIP() << "No CUDA device";
+  const auto dump = SourcePath("tests/validation/lammps_ref/init_32k.dump");
+  if (!std::filesystem::exists(dump)) GTEST_SKIP() << "32k initial dump is missing";
+  const tilemd::HostSystem melt = LoadLammpsInitial(dump);
+  ASSERT_EQ(melt.x.size(), 32000u);
+
+  constexpr int kSteps = 200;
+  const int widths[] = {1, 10, 50, 200};
+  tilemd::HostSystem narrow = melt;
+  narrow.graph_unroll = 1;
+  tilemd::HostSystem wide = melt;
+  wide.graph_unroll = 200;
+  tilemd::Engine one(narrow);
+  tilemd::Engine two_hundred(wide);
+  one.Run(kSteps);
+  two_hundred.Run(kSteps);
+  std::vector<double> x1, y1, z1, x2, y2, z2, vx1, vy1, vz1, vx2, vy2, vz2;
+  one.DownloadPositions(x1, y1, z1);
+  two_hundred.DownloadPositions(x2, y2, z2);
+  one.DownloadVelocities(vx1, vy1, vz1);
+  two_hundred.DownloadVelocities(vx2, vy2, vz2);
+  EXPECT_EQ(0, std::memcmp(x1.data(), x2.data(), x1.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(y1.data(), y2.data(), y1.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(z1.data(), z2.data(), z1.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(vx1.data(), vx2.data(), vx1.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(vy1.data(), vy2.data(), vy1.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(vz1.data(), vz2.data(), vz1.size() * sizeof(double)));
+
+  for (int width : widths) {
+    tilemd::HostSystem host = melt;
+    host.graph_unroll = width;
+    const std::string label = "melt_32k unroll " + std::to_string(width);
+    TimePath(label.c_str(), std::move(host), 50, kSteps);
+  }
+
+  const tilemd::HostSystem lattice = FccLattice(40, 0.8442);
+  for (int width : widths) {
+    try {
+      tilemd::HostSystem host = lattice;
+      host.graph_unroll = width;
+      const std::string label = "fcc_256k unroll " + std::to_string(width);
+      TimePath(label.c_str(), std::move(host), 20, kSteps);
+    } catch (const std::exception& ex) {
+      std::cout << "fcc_256k unroll " << width << " skipped: " << ex.what() << "\n";
+    }
+  }
+}
