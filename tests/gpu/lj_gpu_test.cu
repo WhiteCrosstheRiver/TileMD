@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include "lj_reference.hpp"
 #include "md/engine.hpp"
 #include "md/tile_rebuild.hpp"
+#include "md/tile_thermo.hpp"
 #include "neighbor/cluster_list.hpp"
 
 namespace {
@@ -736,5 +738,93 @@ TEST(GpuLj, FusedLeapfrogMatchesTheCpuFor100Steps) {
     EXPECT_TRUE(std::isfinite(max_v));
     EXPECT_LT(max_x, 1.0e-7) << "rebuild_every_step " << rebuild_every_step;
     EXPECT_LT(max_v, 1.0e-7) << "rebuild_every_step " << rebuild_every_step;
+  }
+}
+
+TEST(GpuLj, FusedThermoMatchesTheCpuLeapfrog) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const tilemd::ref::System origin = LatticeBox();
+  const int n = static_cast<int>(origin.x.size());
+  std::vector<double> vx(static_cast<size_t>(n));
+  std::vector<double> vy(static_cast<size_t>(n));
+  std::vector<double> vz(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] = 0.02 * ((i % 5) - 2);
+    vy[static_cast<size_t>(i)] = 0.015 * ((i % 4) - 1);
+    vz[static_cast<size_t>(i)] = 0.01 * ((i % 3) - 1);
+  }
+  constexpr double dt = 0.005;
+  constexpr double mass = 1.0;
+  constexpr int every = 2;
+  constexpr int nstep = 8;
+  const std::vector<int> expect_steps = tilemd::TileThermoSteps(nstep, every);
+  std::vector<double> cpu_ke;
+  std::vector<double> cpu_pe;
+  std::vector<std::array<double, 6>> cpu_w;
+  tilemd::ref::System cpu_system = origin;
+  tilemd::ref::Dynamics cpu = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::PrepareLeapfrog(cpu_system, cpu, dt, mass);
+  auto record = [&](int step) {
+    std::vector<double> ivx;
+    std::vector<double> ivy;
+    std::vector<double> ivz;
+    tilemd::ref::IntegerTimeVelocity(cpu_system, cpu, dt, mass, ivx, ivy, ivz);
+    tilemd::ref::System viewed = origin;
+    viewed.x = cpu.x;
+    viewed.y = cpu.y;
+    viewed.z = cpu.z;
+    const tilemd::ref::Observables obs = tilemd::ref::Compute(viewed);
+    double ke = 0.0;
+    for (int i = 0; i < n; ++i) {
+      ke += 0.5 * (ivx[static_cast<size_t>(i)] * ivx[static_cast<size_t>(i)] +
+                   ivy[static_cast<size_t>(i)] * ivy[static_cast<size_t>(i)] +
+                   ivz[static_cast<size_t>(i)] * ivz[static_cast<size_t>(i)]);
+    }
+    cpu_ke.push_back(ke);
+    cpu_pe.push_back(obs.potential_energy);
+    std::array<double, 6> virial{};
+    for (int axis = 0; axis < 6; ++axis) virial[static_cast<size_t>(axis)] = obs.virial[axis];
+    cpu_w.push_back(virial);
+    (void)step;
+  };
+  for (int step = 0; step < nstep; ++step) {
+    if (tilemd::TileRecordsThermo(step, every)) record(step);
+    tilemd::ref::LeapfrogStep(cpu_system, cpu, dt, mass);
+  }
+  if (tilemd::TileRecordsThermo(nstep, every)) record(nstep);
+  ASSERT_EQ(cpu_ke.size(), expect_steps.size());
+
+  const bool rebuilds[] = {true, false};
+  for (bool rebuild_every_step : rebuilds) {
+    tilemd::HostSystem host = FromReference(origin, 0.3, 0, rebuild_every_step);
+    host.use_cluster_tiles = true;
+    host.dt = dt;
+    host.mass = mass;
+    host.thermo_every = every;
+    host.vx = vx;
+    host.vy = vy;
+    host.vz = vz;
+    tilemd::Engine engine(std::move(host));
+    engine.Run(nstep);
+    const std::vector<tilemd::ThermoSample> got = engine.DrainThermo();
+    ASSERT_EQ(got.size(), expect_steps.size()) << "rebuild_every_step " << rebuild_every_step;
+    double max_pe = 0.0;
+    double max_ke = 0.0;
+    double max_w = 0.0;
+    for (size_t s = 0; s < got.size(); ++s) {
+      EXPECT_EQ(got[s].step, expect_steps[s]) << "rebuild_every_step " << rebuild_every_step;
+      max_pe = std::max(max_pe, std::abs(got[s].potential_energy - cpu_pe[s]));
+      max_ke = std::max(max_ke, std::abs(got[s].kinetic_energy - cpu_ke[s]));
+      for (int axis = 0; axis < 6; ++axis) {
+        max_w =
+            std::max(max_w, std::abs(got[s].virial[axis] - cpu_w[s][static_cast<size_t>(axis)]));
+      }
+    }
+    std::cout << std::scientific << std::setprecision(8) << "fused thermo rebuild "
+              << std::boolalpha << rebuild_every_step << " max |dpe| " << max_pe << " max |dke| "
+              << max_ke << " max |dw| " << max_w << "\n";
+    EXPECT_LT(max_pe, 1.0e-6) << "rebuild_every_step " << rebuild_every_step;
+    EXPECT_LT(max_ke, 1.0e-6) << "rebuild_every_step " << rebuild_every_step;
+    EXPECT_LT(max_w, 1.0e-6) << "rebuild_every_step " << rebuild_every_step;
   }
 }
