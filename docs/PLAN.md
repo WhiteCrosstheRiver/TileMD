@@ -1,3 +1,5 @@
+Superseded in part by docs/REVIEW_AND_PLAN_v2.md
+
 # TileMD — Implementation Plan (Stage 1: LJ validation engine)
 
 > **Audience:** the coding agent(s) implementing this engine, and the reviewer (Claude) who will review every pull request on GitHub.
