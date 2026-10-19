@@ -95,28 +95,16 @@ int main(int argc, char** argv) {
     std::vector<int> ix(n, 0), iy(n, 0), iz(n, 0);
     const std::vector<double> x_ref = x, y_ref = y, z_ref = z;
     tilemd::Fp32Lj pair;
-    auto run = [&](int count) {
-      tilemd::Fp32NveStats stats;
-      tilemd::FusedAtomNve(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
-                           ix.data(), iy.data(), iz.data(), x_ref.data(), y_ref.data(),
-                           z_ref.data(), list.nn.data(), list.nl.data(), n, list.max_neigh, pair,
-                           0.005, 1.0, count, tpa, &stats);
-      return stats;
-    };
-    auto run_chunked = [&](int count) {
-      tilemd::Fp32NveStats last;
-      int left = count;
-      while (left > 0) {
-        const int chunk = left < 200 ? left : 200;
-        last = run(chunk);
-        left -= chunk;
-      }
-      return last;
-    };
-    if (warmup > 0) run_chunked(warmup);
+    tilemd::Fp32Session session(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                                ix.data(), iy.data(), iz.data(), x_ref.data(), y_ref.data(),
+                                z_ref.data(), list.nn.data(), list.nl.data(), n, list.max_neigh,
+                                pair, 0.005, 1.0, tpa);
+    if (warmup > 0) session.Steps(warmup);
     const auto t0 = std::chrono::steady_clock::now();
-    const tilemd::Fp32NveStats stats = run_chunked(steps);
+    const tilemd::Fp32NveStats stats = session.Steps(steps);
     const auto t1 = std::chrono::steady_clock::now();
+    session.Download(x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(), ix.data(),
+                     iy.data(), iz.data());
     const double seconds = std::chrono::duration<double>(t1 - t0).count();
     const double rate = static_cast<double>(n) * static_cast<double>(steps) / seconds;
     std::cout.setf(std::ios::scientific);
@@ -125,7 +113,7 @@ int main(int argc, char** argv) {
               << ",\"warmup\":" << warmup << ",\"tpa\":" << tpa << ",\"t_loop_s\":" << seconds
               << ",\"atom_steps_per_s\":" << rate << ",\"max_disp2\":" << stats.max_disp2
               << ",\"max_neigh\":" << list.max_neigh
-              << ",\"note\":\"initial rc+skin cell list, not rebuilt, sync every 200 steps\"}\n";
+              << ",\"note\":\"initial rc+skin cell list, not rebuilt, device stays resident\"}\n";
     return 0;
   } catch (const std::exception& err) {
     std::cerr << err.what() << "\n";

@@ -332,129 +332,191 @@ Fp32Force FusedAtomForce(const double* box, const double* x, const double* y, co
   }
 }
 
+struct Fp32Session::Impl {
+  Hold hold;
+  double* x = nullptr;
+  double* y = nullptr;
+  double* z = nullptr;
+  double* vx = nullptr;
+  double* vy = nullptr;
+  double* vz = nullptr;
+  double* xref = nullptr;
+  double* yref = nullptr;
+  double* zref = nullptr;
+  int* image_x = nullptr;
+  int* image_y = nullptr;
+  int* image_z = nullptr;
+  int* nn = nullptr;
+  int* nl = nullptr;
+  int* bits = nullptr;
+  float4* buffers[2] = {};
+  int current = 0;
+  int n = 0;
+  int threads_per_atom = 1;
+  Fp32Lj pair;
+  BoxCells cells;
+  double dt = 0.0;
+  double mass = 0.0;
+  double box[3] = {};
+};
+
+void Fp32Session::LaunchOne() {
+  Impl* impl = impl_;
+  const int next = 1 - impl->current;
+  if (impl->threads_per_atom == 1) {
+    LaunchStep<1>(impl->buffers[impl->current], impl->buffers[next], impl->x, impl->y, impl->z,
+                  impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
+                  impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
+                  impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
+                  impl->bits);
+  } else if (impl->threads_per_atom == 2) {
+    LaunchStep<2>(impl->buffers[impl->current], impl->buffers[next], impl->x, impl->y, impl->z,
+                  impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
+                  impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
+                  impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
+                  impl->bits);
+  } else if (impl->threads_per_atom == 4) {
+    LaunchStep<4>(impl->buffers[impl->current], impl->buffers[next], impl->x, impl->y, impl->z,
+                  impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
+                  impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
+                  impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
+                  impl->bits);
+  } else {
+    LaunchStep<8>(impl->buffers[impl->current], impl->buffers[next], impl->x, impl->y, impl->z,
+                  impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
+                  impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
+                  impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
+                  impl->bits);
+  }
+  Check(cudaGetLastError(), "fused atom step launch");
+  impl->current = next;
+}
+
+Fp32Session::Fp32Session(const double* box, const double* x, const double* y, const double* z,
+                         const double* vx, const double* vy, const double* vz, const int* image_x,
+                         const int* image_y, const int* image_z, const double* x_ref,
+                         const double* y_ref, const double* z_ref, const int* nn, const int* nl,
+                         int n, int max_neigh, const Fp32Lj& pair, double dt, double mass,
+                         int threads_per_atom)
+    : impl_(new Impl) {
+  try {
+    if (n <= 0) throw std::runtime_error("fused atom step needs at least one atom");
+    if (!(mass > 0.0) || !(dt > 0.0)) throw std::runtime_error("mass and dt must be positive");
+    if (threads_per_atom != 1 && threads_per_atom != 2 && threads_per_atom != 4 &&
+        threads_per_atom != 8) {
+      throw std::runtime_error("threads per atom must be 1, 2, 4, or 8");
+    }
+    const std::size_t atoms = static_cast<std::size_t>(n);
+    const std::size_t list = static_cast<std::size_t>(max_neigh) * atoms;
+    auto alloc = [&](void** pointer, std::size_t bytes, const char* what) {
+      Check(cudaMalloc(pointer, bytes), what);
+      impl_->hold.Add(*pointer);
+    };
+    alloc(reinterpret_cast<void**>(&impl_->x), atoms * sizeof(double), "cudaMalloc x");
+    alloc(reinterpret_cast<void**>(&impl_->y), atoms * sizeof(double), "cudaMalloc y");
+    alloc(reinterpret_cast<void**>(&impl_->z), atoms * sizeof(double), "cudaMalloc z");
+    alloc(reinterpret_cast<void**>(&impl_->vx), atoms * sizeof(double), "cudaMalloc vx");
+    alloc(reinterpret_cast<void**>(&impl_->vy), atoms * sizeof(double), "cudaMalloc vy");
+    alloc(reinterpret_cast<void**>(&impl_->vz), atoms * sizeof(double), "cudaMalloc vz");
+    alloc(reinterpret_cast<void**>(&impl_->xref), atoms * sizeof(double), "cudaMalloc xref");
+    alloc(reinterpret_cast<void**>(&impl_->yref), atoms * sizeof(double), "cudaMalloc yref");
+    alloc(reinterpret_cast<void**>(&impl_->zref), atoms * sizeof(double), "cudaMalloc zref");
+    alloc(reinterpret_cast<void**>(&impl_->image_x), atoms * sizeof(int), "cudaMalloc image x");
+    alloc(reinterpret_cast<void**>(&impl_->image_y), atoms * sizeof(int), "cudaMalloc image y");
+    alloc(reinterpret_cast<void**>(&impl_->image_z), atoms * sizeof(int), "cudaMalloc image z");
+    alloc(reinterpret_cast<void**>(&impl_->nn), atoms * sizeof(int), "cudaMalloc nn");
+    alloc(reinterpret_cast<void**>(&impl_->nl), list * sizeof(int), "cudaMalloc nl");
+    alloc(reinterpret_cast<void**>(&impl_->bits), sizeof(int), "cudaMalloc disp");
+    alloc(reinterpret_cast<void**>(&impl_->buffers[0]), atoms * sizeof(float4), "cudaMalloc pos0");
+    alloc(reinterpret_cast<void**>(&impl_->buffers[1]), atoms * sizeof(float4), "cudaMalloc pos1");
+    Check(cudaMemcpy(impl_->x, x, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy x");
+    Check(cudaMemcpy(impl_->y, y, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy y");
+    Check(cudaMemcpy(impl_->z, z, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy z");
+    Check(cudaMemcpy(impl_->vx, vx, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy vx");
+    Check(cudaMemcpy(impl_->vy, vy, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy vy");
+    Check(cudaMemcpy(impl_->vz, vz, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy vz");
+    Check(cudaMemcpy(impl_->xref, x_ref, atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "copy xref");
+    Check(cudaMemcpy(impl_->yref, y_ref, atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "copy yref");
+    Check(cudaMemcpy(impl_->zref, z_ref, atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "copy zref");
+    Check(cudaMemcpy(impl_->image_x, image_x, atoms * sizeof(int), cudaMemcpyHostToDevice),
+          "copy image x");
+    Check(cudaMemcpy(impl_->image_y, image_y, atoms * sizeof(int), cudaMemcpyHostToDevice),
+          "copy image y");
+    Check(cudaMemcpy(impl_->image_z, image_z, atoms * sizeof(int), cudaMemcpyHostToDevice),
+          "copy image z");
+    Check(cudaMemcpy(impl_->nn, nn, atoms * sizeof(int), cudaMemcpyHostToDevice), "copy nn");
+    Check(cudaMemcpy(impl_->nl, nl, list * sizeof(int), cudaMemcpyHostToDevice), "copy nl");
+    impl_->n = n;
+    impl_->threads_per_atom = threads_per_atom;
+    impl_->pair = pair;
+    impl_->cells = CellsOf(box);
+    impl_->dt = dt;
+    impl_->mass = mass;
+    impl_->box[0] = box[0];
+    impl_->box[1] = box[1];
+    impl_->box[2] = box[2];
+    const int encode_grid = (n + 127) / 128;
+    EncodeShadowKernel<<<encode_grid, 128>>>(impl_->x, impl_->y, impl_->z, impl_->buffers[0], n);
+    Check(cudaGetLastError(), "encode shadow");
+    Check(cudaDeviceSynchronize(), "encode shadow");
+  } catch (...) {
+    delete impl_;
+    impl_ = nullptr;
+    throw;
+  }
+}
+
+Fp32Session::~Fp32Session() { delete impl_; }
+
+Fp32NveStats Fp32Session::Steps(int steps) {
+  if (steps <= 0) throw std::runtime_error("fused atom step needs at least one step");
+  Check(cudaMemset(impl_->bits, 0, sizeof(int)), "clear disp");
+  int left = steps;
+  while (left > 0) {
+    const int chunk = left < 200 ? left : 200;
+    for (int step = 0; step < chunk; ++step) LaunchOne();
+    Check(cudaDeviceSynchronize(), "fused atom step");
+    left -= chunk;
+  }
+  int host_bits = 0;
+  Check(cudaMemcpy(&host_bits, impl_->bits, sizeof(int), cudaMemcpyDeviceToHost), "copy disp");
+  float disp_bits = 0.f;
+  std::memcpy(&disp_bits, &host_bits, sizeof(disp_bits));
+  Fp32NveStats stats;
+  stats.max_disp2 = static_cast<double>(disp_bits);
+  return stats;
+}
+
+void Fp32Session::Download(double* x, double* y, double* z, double* vx, double* vy, double* vz,
+                           int* image_x, int* image_y, int* image_z) const {
+  const std::size_t atoms = static_cast<std::size_t>(impl_->n);
+  Check(cudaMemcpy(x, impl_->x, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read x");
+  Check(cudaMemcpy(y, impl_->y, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read y");
+  Check(cudaMemcpy(z, impl_->z, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read z");
+  Check(cudaMemcpy(vx, impl_->vx, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read vx");
+  Check(cudaMemcpy(vy, impl_->vy, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read vy");
+  Check(cudaMemcpy(vz, impl_->vz, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read vz");
+  Check(cudaMemcpy(image_x, impl_->image_x, atoms * sizeof(int), cudaMemcpyDeviceToHost),
+        "read image x");
+  Check(cudaMemcpy(image_y, impl_->image_y, atoms * sizeof(int), cudaMemcpyDeviceToHost),
+        "read image y");
+  Check(cudaMemcpy(image_z, impl_->image_z, atoms * sizeof(int), cudaMemcpyDeviceToHost),
+        "read image z");
+}
+
 void FusedAtomNve(const double* box, double* x, double* y, double* z, double* vx, double* vy,
                   double* vz, int* image_x, int* image_y, int* image_z, const double* x_ref,
                   const double* y_ref, const double* z_ref, const int* nn, const int* nl, int n,
                   int max_neigh, const Fp32Lj& pair, double dt, double mass, int steps,
                   int threads_per_atom, Fp32NveStats* stats) {
-  if (n <= 0 || steps <= 0) throw std::runtime_error("fused atom step needs atoms and steps");
-  if (!(mass > 0.0) || !(dt > 0.0)) throw std::runtime_error("mass and dt must be positive");
-  if (threads_per_atom != 1 && threads_per_atom != 2 && threads_per_atom != 4 &&
-      threads_per_atom != 8) {
-    throw std::runtime_error("threads per atom must be 1, 2, 4, or 8");
-  }
   if (stats == nullptr) throw std::runtime_error("missing nve stats");
-
-  const std::size_t atoms = static_cast<std::size_t>(n);
-  const std::size_t list = static_cast<std::size_t>(max_neigh) * atoms;
-  Hold hold;
-  double* dx = nullptr;
-  double* dy = nullptr;
-  double* dz = nullptr;
-  double* dvx = nullptr;
-  double* dvy = nullptr;
-  double* dvz = nullptr;
-  double* xref = nullptr;
-  double* yref = nullptr;
-  double* zref = nullptr;
-  int* ix = nullptr;
-  int* iy = nullptr;
-  int* iz = nullptr;
-  int* dnn = nullptr;
-  int* dnl = nullptr;
-  int* bits = nullptr;
-  float4* pos0 = nullptr;
-  float4* pos1 = nullptr;
-  Check(cudaMalloc(&dx, atoms * sizeof(double)), "cudaMalloc x");
-  hold.Add(dx);
-  Check(cudaMalloc(&dy, atoms * sizeof(double)), "cudaMalloc y");
-  hold.Add(dy);
-  Check(cudaMalloc(&dz, atoms * sizeof(double)), "cudaMalloc z");
-  hold.Add(dz);
-  Check(cudaMalloc(&dvx, atoms * sizeof(double)), "cudaMalloc vx");
-  hold.Add(dvx);
-  Check(cudaMalloc(&dvy, atoms * sizeof(double)), "cudaMalloc vy");
-  hold.Add(dvy);
-  Check(cudaMalloc(&dvz, atoms * sizeof(double)), "cudaMalloc vz");
-  hold.Add(dvz);
-  Check(cudaMalloc(&xref, atoms * sizeof(double)), "cudaMalloc xref");
-  hold.Add(xref);
-  Check(cudaMalloc(&yref, atoms * sizeof(double)), "cudaMalloc yref");
-  hold.Add(yref);
-  Check(cudaMalloc(&zref, atoms * sizeof(double)), "cudaMalloc zref");
-  hold.Add(zref);
-  Check(cudaMalloc(&ix, atoms * sizeof(int)), "cudaMalloc image x");
-  hold.Add(ix);
-  Check(cudaMalloc(&iy, atoms * sizeof(int)), "cudaMalloc image y");
-  hold.Add(iy);
-  Check(cudaMalloc(&iz, atoms * sizeof(int)), "cudaMalloc image z");
-  hold.Add(iz);
-  Check(cudaMalloc(&dnn, atoms * sizeof(int)), "cudaMalloc nn");
-  hold.Add(dnn);
-  Check(cudaMalloc(&dnl, list * sizeof(int)), "cudaMalloc nl");
-  hold.Add(dnl);
-  Check(cudaMalloc(&bits, sizeof(int)), "cudaMalloc disp");
-  hold.Add(bits);
-  Check(cudaMalloc(&pos0, atoms * sizeof(float4)), "cudaMalloc pos0");
-  hold.Add(pos0);
-  Check(cudaMalloc(&pos1, atoms * sizeof(float4)), "cudaMalloc pos1");
-  hold.Add(pos1);
-
-  Check(cudaMemcpy(dx, x, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy x");
-  Check(cudaMemcpy(dy, y, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy y");
-  Check(cudaMemcpy(dz, z, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy z");
-  Check(cudaMemcpy(dvx, vx, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy vx");
-  Check(cudaMemcpy(dvy, vy, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy vy");
-  Check(cudaMemcpy(dvz, vz, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy vz");
-  Check(cudaMemcpy(xref, x_ref, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy xref");
-  Check(cudaMemcpy(yref, y_ref, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy yref");
-  Check(cudaMemcpy(zref, z_ref, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy zref");
-  Check(cudaMemcpy(ix, image_x, atoms * sizeof(int), cudaMemcpyHostToDevice), "copy image x");
-  Check(cudaMemcpy(iy, image_y, atoms * sizeof(int), cudaMemcpyHostToDevice), "copy image y");
-  Check(cudaMemcpy(iz, image_z, atoms * sizeof(int), cudaMemcpyHostToDevice), "copy image z");
-  Check(cudaMemcpy(dnn, nn, atoms * sizeof(int), cudaMemcpyHostToDevice), "copy nn");
-  Check(cudaMemcpy(dnl, nl, list * sizeof(int), cudaMemcpyHostToDevice), "copy nl");
-
-  const int encode_grid = (n + 127) / 128;
-  EncodeShadowKernel<<<encode_grid, 128>>>(dx, dy, dz, pos0, n);
-  const BoxCells cells = CellsOf(box);
-  float4* buffers[2] = {pos0, pos1};
-  int current = 0;
-  Check(cudaMemset(bits, 0, sizeof(int)), "clear disp");
-  for (int step = 0; step < steps; ++step) {
-    const int next = 1 - current;
-    if (threads_per_atom == 1) {
-      LaunchStep<1>(buffers[current], buffers[next], dx, dy, dz, dvx, dvy, dvz, ix, iy, iz, xref,
-                    yref, zref, dnn, dnl, n, pair, cells, dt, mass, box[0], box[1], box[2], bits);
-    } else if (threads_per_atom == 2) {
-      LaunchStep<2>(buffers[current], buffers[next], dx, dy, dz, dvx, dvy, dvz, ix, iy, iz, xref,
-                    yref, zref, dnn, dnl, n, pair, cells, dt, mass, box[0], box[1], box[2], bits);
-    } else if (threads_per_atom == 4) {
-      LaunchStep<4>(buffers[current], buffers[next], dx, dy, dz, dvx, dvy, dvz, ix, iy, iz, xref,
-                    yref, zref, dnn, dnl, n, pair, cells, dt, mass, box[0], box[1], box[2], bits);
-    } else {
-      LaunchStep<8>(buffers[current], buffers[next], dx, dy, dz, dvx, dvy, dvz, ix, iy, iz, xref,
-                    yref, zref, dnn, dnl, n, pair, cells, dt, mass, box[0], box[1], box[2], bits);
-    }
-    Check(cudaGetLastError(), "fused atom step launch");
-    current = next;
-  }
-  Check(cudaDeviceSynchronize(), "fused atom step");
-  int host_bits = 0;
-  Check(cudaMemcpy(&host_bits, bits, sizeof(int), cudaMemcpyDeviceToHost), "copy disp");
-  float disp_bits = 0.f;
-  std::memcpy(&disp_bits, &host_bits, sizeof(disp_bits));
-  stats->max_disp2 = static_cast<double>(disp_bits);
-
-  Check(cudaMemcpy(x, dx, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read x");
-  Check(cudaMemcpy(y, dy, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read y");
-  Check(cudaMemcpy(z, dz, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read z");
-  Check(cudaMemcpy(vx, dvx, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read vx");
-  Check(cudaMemcpy(vy, dvy, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read vy");
-  Check(cudaMemcpy(vz, dvz, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read vz");
-  Check(cudaMemcpy(image_x, ix, atoms * sizeof(int), cudaMemcpyDeviceToHost), "read image x");
-  Check(cudaMemcpy(image_y, iy, atoms * sizeof(int), cudaMemcpyDeviceToHost), "read image y");
-  Check(cudaMemcpy(image_z, iz, atoms * sizeof(int), cudaMemcpyDeviceToHost), "read image z");
+  Fp32Session session(box, x, y, z, vx, vy, vz, image_x, image_y, image_z, x_ref, y_ref, z_ref, nn,
+                      nl, n, max_neigh, pair, dt, mass, threads_per_atom);
+  *stats = session.Steps(steps);
+  session.Download(x, y, z, vx, vy, vz, image_x, image_y, image_z);
 }
 
 }  // namespace tilemd

@@ -35,10 +35,31 @@ struct Fp32NveStats {
   double max_disp2 = 0.0;
 };
 
-// One launch per step, queued on the default stream and synced once at the end.
-// FP32 pair force, then symplectic Euler on the double master coordinates.
-// The neighbor list is not rebuilt. `max_disp2` is the largest squared
-// displacement from the reference over the whole run.
+// Device state for the FP32 kick-drift. The constructor uploads once.
+// `Steps` only launches kernels. The neighbor list is not rebuilt.
+class Fp32Session {
+ public:
+  Fp32Session(const double* box, const double* x, const double* y, const double* z,
+              const double* vx, const double* vy, const double* vz, const int* image_x,
+              const int* image_y, const int* image_z, const double* x_ref, const double* y_ref,
+              const double* z_ref, const int* nn, const int* nl, int n, int max_neigh,
+              const Fp32Lj& pair, double dt, double mass, int threads_per_atom);
+  ~Fp32Session();
+  Fp32Session(const Fp32Session&) = delete;
+  Fp32Session& operator=(const Fp32Session&) = delete;
+
+  Fp32NveStats Steps(int steps);
+  void Download(double* x, double* y, double* z, double* vx, double* vy, double* vz, int* image_x,
+                int* image_y, int* image_z) const;
+
+ private:
+  struct Impl;
+  void LaunchOne();
+  Impl* impl_;
+};
+
+// Uploads, runs, and downloads. `max_disp2` is the largest squared displacement
+// from the reference over this call.
 void FusedAtomNve(const double* box, double* x, double* y, double* z, double* vx, double* vy,
                   double* vz, int* image_x, int* image_y, int* image_z, const double* x_ref,
                   const double* y_ref, const double* z_ref, const int* nn, const int* nl, int n,
