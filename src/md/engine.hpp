@@ -26,7 +26,7 @@ struct HostSystem {
   double dt = 0.005;
   // 0 selects the density estimate from PLAN.md section 5.3.
   int max_neigh = 0;
-  bool rebuild_every_step = true;
+  bool rebuild_every_step = false;
   // Atom-neighbor `Run` captures this many steps in one CUDA graph. The fused
   // tile path does the same only when it is not rebuilding every step, and
   // then rebuilds the cluster list on the device between steps. Otherwise it

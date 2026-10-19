@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Host FP32 steps rebuild the cell list after an atom moves past half the skin. A resting lattice does not rebuild.
+- The engine default is a skin-triggered rebuild.
 - GPUMD LJ melt inputs in argon metal units. The writer has not been executed by GPUMD. Generated `model.xyz` files stay out of git.
 - FP32 step session. The device buffers stay allocated between the warmup and the timed steps, so the bench timer does not include a fresh allocation. Not launched.
 - Morton slot order for the FP32 neighbor list, using the engine's 10-bit code. After a shuffle of an 864-atom fcc, neighbor slots are closer together and the pair set is unchanged.

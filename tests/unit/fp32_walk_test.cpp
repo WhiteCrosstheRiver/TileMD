@@ -259,6 +259,30 @@ TEST(Fp32Walk, MortonOrderPullsNeighborsTogether) {
   }
 }
 
+TEST(Fp32Walk, SkinRebuildsOnlyAfterHalfTheSkin) {
+  std::vector<double> x, y, z;
+  double length = 0;
+  MakeFcc(4, &x, &y, &z, &length);
+  const int n = static_cast<int>(x.size());
+  std::vector<double> vx(n, 0.0), vy(n, 0.0), vz(n, 0.0);
+  std::vector<int> ix(n, 0), iy(n, 0), iz(n, 0);
+  const double box[3] = {length, length, length};
+  const tilemd::Fp32SkinStats still =
+      tilemd::HostFp32SkinSteps(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                                ix.data(), iy.data(), iz.data(), n, UnitLj(), 0.005, 1.0, 0.3, 5);
+  EXPECT_EQ(still.rebuilds, 0);
+  EXPECT_LT(still.max_disp2, 0.0225f);
+
+  vx[0] = 40.0;
+  const tilemd::Fp32SkinStats crossed =
+      tilemd::HostFp32SkinSteps(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                                ix.data(), iy.data(), iz.data(), n, UnitLj(), 0.005, 1.0, 0.3, 1);
+  EXPECT_EQ(crossed.rebuilds, 1);
+  EXPECT_GT(crossed.max_disp2, 0.0225f);
+  EXPECT_GE(x[0], 0.0);
+  EXPECT_LT(x[0], length);
+}
+
 TEST(Fp32Walk, CellListSeesThePeriodicFace) {
   const double box[3] = {10, 10, 10};
   const double x[2] = {0.001, 9.999};

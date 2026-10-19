@@ -1,11 +1,15 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 #include "force/lj_pair.hpp"
 #include "force/shadow_delta.hpp"
 #include "md/fused_atom.hpp"
+#include "neighbor/cell_list.hpp"
+#include "neighbor/cluster_order.hpp"
 
 namespace tilemd {
 
@@ -91,6 +95,53 @@ inline Fp32Walk HostFp32Force(const double* box, const double* x, const double* 
     out.pair_abs += static_cast<double>(pair_abs);
   }
   return out;
+}
+
+struct Fp32SkinStats {
+  int rebuilds = 0;
+  float max_disp2 = 0.f;
+};
+
+// One thread's worth of the fused step: FP32 force, kick-drift, then a new
+// cell list only after some atom has moved past half the skin. The list is
+// built at rc + skin. Equality with the trigger does not rebuild.
+inline Fp32SkinStats HostFp32SkinSteps(const double* box, double* x, double* y, double* z,
+                                       double* vx, double* vy, double* vz, int* image_x,
+                                       int* image_y, int* image_z, int n, const Fp32Lj& pair,
+                                       double dt, double mass, double skin, int steps) {
+  if (n <= 0 || steps <= 0) throw std::runtime_error("skin steps need atoms and steps");
+  if (!(skin > 0.0) || !(dt > 0.0) || !(mass > 0.0)) {
+    throw std::runtime_error("skin, dt, and mass must be positive");
+  }
+  const double reach = static_cast<double>(pair.rc) + skin;
+  const float trigger2 = static_cast<float>((skin * 0.5) * (skin * 0.5));
+  std::vector<double> xref(x, x + n);
+  std::vector<double> yref(y, y + n);
+  std::vector<double> zref(z, z + n);
+  CellList list = BuildCellList(box, x, y, z, n, reach);
+  Fp32SkinStats stats;
+  for (int step = 0; step < steps; ++step) {
+    const Fp32Walk force = HostFp32Force(box, x, y, z, list.nn.data(), list.nl.data(), n, pair);
+    float step_disp2 = 0.f;
+    for (int i = 0; i < n; ++i) {
+      KickDriftAxis(x + i, vx + i, force.fx[i], dt, mass, box[0], image_x + i);
+      KickDriftAxis(y + i, vy + i, force.fy[i], dt, mass, box[1], image_y + i);
+      KickDriftAxis(z + i, vz + i, force.fz[i], dt, mass, box[2], image_z + i);
+      const double dx = OnReferenceBranch(x[i], xref[i], box[0]) - xref[i];
+      const double dy = OnReferenceBranch(y[i], yref[i], box[1]) - yref[i];
+      const double dz = OnReferenceBranch(z[i], zref[i], box[2]) - zref[i];
+      step_disp2 = std::max(step_disp2, static_cast<float>(dx * dx + dy * dy + dz * dz));
+    }
+    stats.max_disp2 = std::max(stats.max_disp2, step_disp2);
+    if (DisplacementNeedsRebuild(step_disp2, trigger2)) {
+      list = BuildCellList(box, x, y, z, n, reach);
+      xref.assign(x, x + n);
+      yref.assign(y, y + n);
+      zref.assign(z, z + n);
+      ++stats.rebuilds;
+    }
+  }
+  return stats;
 }
 
 }  // namespace tilemd
