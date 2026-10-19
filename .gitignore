@@ -16,6 +16,7 @@ __pycache__/
 *.lammpstrj
 dumps/
 scratch/
+bench/inputs/gpumd/generated/
 .DS_Store
 .idea/
 .vscode/
