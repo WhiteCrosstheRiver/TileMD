@@ -98,4 +98,10 @@ AttentionResult RunLjAttentionGpu(const double* box, const double* x, const doub
                                   const AttentionPair* pairs, int npair, AttentionShift shift,
                                   double skin = 0.3);
 
+// Builds the cluster list once, then times `repeats` kernel launches. The
+// returned seconds do not include the list build or the host copy back.
+double TimeLjAttentionKernel(const double* box, const double* x, const double* y, const double* z,
+                             const int* type, int n, const AttentionPair* pairs, int npair,
+                             AttentionShift shift, double skin, int repeats);
+
 }  // namespace tilemd

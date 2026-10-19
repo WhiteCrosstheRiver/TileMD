@@ -35,6 +35,12 @@ struct TileThermoPartial {
 TileDeviceForces RunTileForceGpu(const ClusterGrid& grid, const ClusterPairs& list,
                                  const LjPair* pairs, int npair, LjShift shift);
 
+// Builds the cluster list once, then times `repeats` forces-only tile launches.
+// The returned seconds do not include the list build or the host copy back.
+double TimeTileForceKernel(const double* box, const double* x, const double* y, const double* z,
+                           const int* type, int n, const LjPair* pairs, int npair, LjShift shift,
+                           double skin, int repeats);
+
 // One leapfrog step. Pair coordinates are read from `pos_cur`. The owning lane
 // updates that atom's double position and velocity and writes `pos_next`.
 void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, const LjPair* pairs,

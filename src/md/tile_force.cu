@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -493,6 +494,103 @@ TileDeviceForces RunTileForceGpu(const ClusterGrid& grid, const ClusterPairs& li
     out.virial[5] += atom_wyz[static_cast<size_t>(i)];
   }
   return out;
+}
+
+double TimeTileForceKernel(const double* box, const double* x, const double* y, const double* z,
+                           const int* type, int n, const LjPair* pairs, int npair, LjShift shift,
+                           double skin, int repeats) {
+  if (repeats < 1) throw std::invalid_argument("tile timing needs at least one launch");
+  if (n < 1 || npair < 1) throw std::invalid_argument("tile timing needs atoms and a pair");
+  double max_cut = 0.0;
+  TileRow rows[kTileTypes * kTileTypes] = {};
+  for (int p = 0; p < npair; ++p) {
+    const LjPair& coeff = pairs[p];
+    if (coeff.type_i < 0 || coeff.type_j < 0 || coeff.type_i >= kTileTypes ||
+        coeff.type_j >= kTileTypes) {
+      throw std::invalid_argument("pair type is outside 0..7");
+    }
+    max_cut = std::max(max_cut, coeff.cutoff);
+    auto fill = [&](int ti, int tj) {
+      TileRow& row = rows[ti * kTileTypes + tj];
+      row.defined = 1;
+      row.sigma2 = coeff.sigma * coeff.sigma;
+      row.eps4 = 4.0 * coeff.epsilon;
+      row.eps24 = 24.0 * coeff.epsilon;
+      row.rc = coeff.cutoff;
+      row.rc2 = coeff.cutoff * coeff.cutoff;
+      const double inv_rc2 = 1.0 / row.rc2;
+      const double sr2 = row.sigma2 * inv_rc2;
+      const double sr6 = sr2 * sr2 * sr2;
+      const double u_c = row.eps4 * sr6 * (sr6 - 1.0);
+      row.s_rc = row.eps24 * inv_rc2 * sr6 * (2.0 * sr6 - 1.0);
+      row.u_shift = (shift == LjShift::None) ? 0.0 : u_c;
+    };
+    fill(coeff.type_i, coeff.type_j);
+    if (coeff.type_i != coeff.type_j) fill(coeff.type_j, coeff.type_i);
+  }
+  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, max_cut + skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  if (grid.ncluster < 1) return 0.0;
+  const int shift_code = static_cast<int>(shift);
+  Check(cudaMemcpyToSymbol(c_tile_rows, rows, sizeof(rows)));
+  Check(cudaMemcpyToSymbol(c_tile_box, grid.box, sizeof(grid.box)));
+  Check(cudaMemcpyToSymbol(c_tile_shift, &shift_code, sizeof(shift_code)));
+  const int nslot = grid.ncluster * 8;
+  DeviceBuffer<double> dx(static_cast<size_t>(nslot));
+  DeviceBuffer<double> dy(static_cast<size_t>(nslot));
+  DeviceBuffer<double> dz(static_cast<size_t>(nslot));
+  DeviceBuffer<int> dtype(static_cast<size_t>(nslot));
+  DeviceBuffer<int> dgid(static_cast<size_t>(nslot));
+  DeviceBuffer<int> dstart(list.ci_start.size());
+  DeviceBuffer<int> dcj(list.cj.size());
+  DeviceBuffer<int> dimage(list.shift.size());
+  DeviceBuffer<double> dfx(static_cast<size_t>(n));
+  DeviceBuffer<double> dfy(static_cast<size_t>(n));
+  DeviceBuffer<double> dfz(static_cast<size_t>(n));
+  DeviceBuffer<double> denergy(static_cast<size_t>(n));
+  DeviceBuffer<double> dwxx(static_cast<size_t>(n));
+  DeviceBuffer<double> dwyy(static_cast<size_t>(n));
+  DeviceBuffer<double> dwzz(static_cast<size_t>(n));
+  DeviceBuffer<double> dwxy(static_cast<size_t>(n));
+  DeviceBuffer<double> dwxz(static_cast<size_t>(n));
+  DeviceBuffer<double> dwyz(static_cast<size_t>(n));
+  DeviceBuffer<int> missing(1);
+  Check(cudaMemcpy(dx.ptr, grid.x.data(), sizeof(double) * nslot, cudaMemcpyHostToDevice));
+  Check(cudaMemcpy(dy.ptr, grid.y.data(), sizeof(double) * nslot, cudaMemcpyHostToDevice));
+  Check(cudaMemcpy(dz.ptr, grid.z.data(), sizeof(double) * nslot, cudaMemcpyHostToDevice));
+  Check(cudaMemcpy(dtype.ptr, grid.type.data(), sizeof(int) * nslot, cudaMemcpyHostToDevice));
+  Check(cudaMemcpy(dgid.ptr, grid.gid.data(), sizeof(int) * nslot, cudaMemcpyHostToDevice));
+  Check(cudaMemcpy(dstart.ptr, list.ci_start.data(), sizeof(int) * list.ci_start.size(),
+                   cudaMemcpyHostToDevice));
+  if (!list.cj.empty()) {
+    Check(
+        cudaMemcpy(dcj.ptr, list.cj.data(), sizeof(int) * list.cj.size(), cudaMemcpyHostToDevice));
+    Check(cudaMemcpy(dimage.ptr, list.shift.data(), sizeof(int) * list.shift.size(),
+                     cudaMemcpyHostToDevice));
+  }
+  Check(cudaMemset(missing.ptr, 0, sizeof(int)));
+  auto launch = [&]() {
+    TileForceKernel<false><<<grid.ncluster, 32>>>(
+        dx.ptr, dy.ptr, dz.ptr, dtype.ptr, dgid.ptr, dstart.ptr, dcj.ptr, dimage.ptr, dfx.ptr,
+        dfy.ptr, dfz.ptr, denergy.ptr, dwxx.ptr, dwyy.ptr, dwzz.ptr, dwxy.ptr, dwxz.ptr, dwyz.ptr,
+        grid.ncluster, missing.ptr, TileIntegrate{});
+  };
+  launch();
+  Check(cudaDeviceSynchronize());
+  cudaEvent_t start = nullptr;
+  cudaEvent_t stop = nullptr;
+  Check(cudaEventCreate(&start));
+  Check(cudaEventCreate(&stop));
+  Check(cudaEventRecord(start));
+  for (int i = 0; i < repeats; ++i) launch();
+  Check(cudaEventRecord(stop));
+  Check(cudaEventSynchronize(stop));
+  float milliseconds = 0.0f;
+  Check(cudaEventElapsedTime(&milliseconds, start, stop));
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+  Check(cudaGetLastError());
+  return static_cast<double>(milliseconds) * 1.0e-3;
 }
 
 void RunFusedTileLeapfrog(const ClusterGrid& grid, const ClusterPairs& list, const LjPair* pairs,

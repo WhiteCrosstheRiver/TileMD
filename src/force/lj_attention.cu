@@ -259,4 +259,70 @@ AttentionResult RunLjAttentionGpu(const double* box, const double* x, const doub
   return out;
 }
 
+double TimeLjAttentionKernel(const double* box, const double* x, const double* y, const double* z,
+                             const int* type, int n, const AttentionPair* pairs, int npair,
+                             AttentionShift shift, double skin, int repeats) {
+  if (repeats < 1) throw std::invalid_argument("attention timing needs at least one launch");
+  if (n < 1) throw std::invalid_argument("attention timing needs atoms");
+  LjAttention potential(pairs, npair, shift);
+  LjRow table[LjAttention::kMaxTypes * LjAttention::kMaxTypes];
+  potential.CopyTable(table);
+  const ClusterGrid grid = BuildClusterGrid(box, x, y, z, type, n, potential.Cutoff() + skin);
+  const ClusterPairs list = BuildClusterPairs(grid);
+  if (grid.ncluster < 1) return 0.0;
+
+  struct CudaFree {
+    void* ptr = nullptr;
+    ~CudaFree() { cudaFree(ptr); }
+  };
+  CudaFree dx{Upload(grid.x, "copy x")};
+  CudaFree dy{Upload(grid.y, "copy y")};
+  CudaFree dz{Upload(grid.z, "copy z")};
+  CudaFree dtype{Upload(grid.type, "copy type")};
+  CudaFree dgid{Upload(grid.gid, "copy gid")};
+  CudaFree dstart{Upload(list.ci_start, "copy ci_start")};
+  CudaFree dcj{Upload(list.cj, "copy cj")};
+  CudaFree dshift{Upload(list.shift, "copy shift")};
+  CudaFree dtable;
+  CudaFree dfx;
+  CudaFree dfy;
+  CudaFree dfz;
+  CudaFree denergy;
+  CudaFree dvirial;
+  const size_t bytes = static_cast<size_t>(n) * sizeof(double);
+  CheckCuda(cudaMalloc(&dtable.ptr, sizeof(table)), "cudaMalloc table");
+  CheckCuda(cudaMalloc(&dfx.ptr, bytes), "cudaMalloc fx");
+  CheckCuda(cudaMalloc(&dfy.ptr, bytes), "cudaMalloc fy");
+  CheckCuda(cudaMalloc(&dfz.ptr, bytes), "cudaMalloc fz");
+  CheckCuda(cudaMalloc(&denergy.ptr, bytes), "cudaMalloc energy");
+  CheckCuda(cudaMalloc(&dvirial.ptr, 6 * bytes), "cudaMalloc virial");
+  CheckCuda(cudaMemcpy(dtable.ptr, table, sizeof(table), cudaMemcpyHostToDevice), "copy table");
+
+  auto launch = [&]() {
+    LjAttentionTileKernel<<<grid.ncluster, 32>>>(
+        static_cast<double*>(dx.ptr), static_cast<double*>(dy.ptr), static_cast<double*>(dz.ptr),
+        static_cast<int*>(dtype.ptr), static_cast<int*>(dgid.ptr), static_cast<int*>(dstart.ptr),
+        static_cast<int*>(dcj.ptr), static_cast<int*>(dshift.ptr), static_cast<LjRow*>(dtable.ptr),
+        potential.ForceShift(), grid.box[0], grid.box[1], grid.box[2], n, grid.ncluster,
+        static_cast<double*>(dfx.ptr), static_cast<double*>(dfy.ptr), static_cast<double*>(dfz.ptr),
+        static_cast<double*>(denergy.ptr), static_cast<double*>(dvirial.ptr));
+  };
+  launch();
+  CheckCuda(cudaDeviceSynchronize(), "attention warmup");
+  cudaEvent_t start = nullptr;
+  cudaEvent_t stop = nullptr;
+  CheckCuda(cudaEventCreate(&start), "event");
+  CheckCuda(cudaEventCreate(&stop), "event");
+  CheckCuda(cudaEventRecord(start), "event");
+  for (int i = 0; i < repeats; ++i) launch();
+  CheckCuda(cudaEventRecord(stop), "event");
+  CheckCuda(cudaEventSynchronize(stop), "event");
+  float milliseconds = 0.0f;
+  CheckCuda(cudaEventElapsedTime(&milliseconds, start, stop), "event");
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+  CheckCuda(cudaGetLastError(), "LjAttentionTileKernel");
+  return static_cast<double>(milliseconds) * 1.0e-3;
+}
+
 }  // namespace tilemd
