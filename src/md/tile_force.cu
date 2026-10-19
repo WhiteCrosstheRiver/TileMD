@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "core/device_status.hpp"
 #include "md/flag_nan.hpp"
@@ -484,14 +485,20 @@ TileDeviceForces RunTileForceGpu(const ClusterGrid& grid, const ClusterPairs& li
   Check(cudaMemcpy(atom_wxy.data(), wxy.ptr, sizeof(double) * n, cudaMemcpyDeviceToHost));
   Check(cudaMemcpy(atom_wxz.data(), wxz.ptr, sizeof(double) * n, cudaMemcpyDeviceToHost));
   Check(cudaMemcpy(atom_wyz.data(), wyz.ptr, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  out.wxx = std::move(atom_wxx);
+  out.wyy = std::move(atom_wyy);
+  out.wzz = std::move(atom_wzz);
+  out.wxy = std::move(atom_wxy);
+  out.wxz = std::move(atom_wxz);
+  out.wyz = std::move(atom_wyz);
   for (int i = 0; i < n; ++i) {
     out.potential_energy += atom_energy[static_cast<size_t>(i)];
-    out.virial[0] += atom_wxx[static_cast<size_t>(i)];
-    out.virial[1] += atom_wyy[static_cast<size_t>(i)];
-    out.virial[2] += atom_wzz[static_cast<size_t>(i)];
-    out.virial[3] += atom_wxy[static_cast<size_t>(i)];
-    out.virial[4] += atom_wxz[static_cast<size_t>(i)];
-    out.virial[5] += atom_wyz[static_cast<size_t>(i)];
+    out.virial[0] += out.wxx[static_cast<size_t>(i)];
+    out.virial[1] += out.wyy[static_cast<size_t>(i)];
+    out.virial[2] += out.wzz[static_cast<size_t>(i)];
+    out.virial[3] += out.wxy[static_cast<size_t>(i)];
+    out.virial[4] += out.wxz[static_cast<size_t>(i)];
+    out.virial[5] += out.wyz[static_cast<size_t>(i)];
   }
   return out;
 }

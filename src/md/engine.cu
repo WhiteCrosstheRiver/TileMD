@@ -796,6 +796,10 @@ struct Engine::Impl {
   void ClearFlags();
   [[noreturn]] void AbortIfNonFinite(int step, const DeviceStatus& host);
   void WriteDump(int step, bool append);
+  void CollectDumpVirial(std::vector<double>& oxx, std::vector<double>& oyy,
+                         std::vector<double>& ozz, std::vector<double>& oxy,
+                         std::vector<double>& oxz, std::vector<double>& oyz);
+  TileDeviceForces EvaluateTiles();
   void BuildCells();
   void ApplySpatialOrder();
   void QueueRebuild(cudaStream_t stream);
@@ -1215,9 +1219,47 @@ void Engine::Impl::WriteDump(int step, bool append) {
   const char* shift_name = "none";
   if (system.shift == Shift::Energy) shift_name = "energy";
   if (system.shift == Shift::Force) shift_name = "force";
+  std::vector<double> oxx;
+  std::vector<double> oyy;
+  std::vector<double> ozz;
+  std::vector<double> oxy;
+  std::vector<double> oxz;
+  std::vector<double> oyz;
+  const double* virial_xx = nullptr;
+  if (system.dump_virial != 0) {
+    CollectDumpVirial(oxx, oyy, ozz, oxy, oxz, oyz);
+    virial_xx = oxx.data();
+  }
   WriteEmergencyFrame(system.dump_path, system.box, hx.data(), hy.data(), hz.data(), hvx.data(),
                       hvy.data(), hvz.data(), type_gid.data(), identity.data(), n, step, append,
-                      shift_name);
+                      shift_name, virial_xx, oyy.data(), ozz.data(), oxy.data(), oxz.data(),
+                      oyz.data());
+}
+
+void Engine::Impl::CollectDumpVirial(std::vector<double>& oxx, std::vector<double>& oyy,
+                                     std::vector<double>& ozz, std::vector<double>& oxy,
+                                     std::vector<double>& oxz, std::vector<double>& oyz) {
+  if (system.use_cluster_tiles) {
+    const TileDeviceForces raw = EvaluateTiles();
+    oxx = raw.wxx;
+    oyy = raw.wyy;
+    ozz = raw.wzz;
+    oxy = raw.wxy;
+    oxz = raw.wxz;
+    oyz = raw.wyz;
+    return;
+  }
+  int one = 1;
+  TILEMD_CHECK(cudaMemcpy(ev_flag, &one, sizeof(one), cudaMemcpyHostToDevice));
+  LaunchForce(kBlock, nullptr, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy, wxz,
+              wyz, n, status, ev_flag);
+  CheckLaunch();
+  ScatterToGid(wxx, gid, n, oxx);
+  ScatterToGid(wyy, gid, n, oyy);
+  ScatterToGid(wzz, gid, n, ozz);
+  ScatterToGid(wxy, gid, n, oxy);
+  ScatterToGid(wxz, gid, n, oxz);
+  ScatterToGid(wyz, gid, n, oyz);
 }
 
 void Engine::Impl::ClearFlags() {
@@ -1520,7 +1562,7 @@ void Engine::Impl::ComputeForce() {
   forces_ready = true;
 }
 
-GpuForces Engine::Impl::TileForces() {
+TileDeviceForces Engine::Impl::EvaluateTiles() {
   std::vector<double> hx(static_cast<size_t>(n));
   std::vector<double> hy(static_cast<size_t>(n));
   std::vector<double> hz(static_cast<size_t>(n));
@@ -1550,8 +1592,11 @@ GpuForces Engine::Impl::TileForces() {
   const ClusterGrid grid = BuildClusterGrid(system.box, hx.data(), hy.data(), hz.data(),
                                             htype.data(), n, max_cut + system.skin);
   const ClusterPairs list = BuildClusterPairs(grid);
-  const TileDeviceForces raw =
-      RunTileForceGpu(grid, list, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift);
+  return RunTileForceGpu(grid, list, coeffs.data(), static_cast<int>(coeffs.size()), lj_shift);
+}
+
+GpuForces Engine::Impl::TileForces() {
+  const TileDeviceForces raw = EvaluateTiles();
   GpuForces out;
   out.fx.resize(static_cast<size_t>(n));
   out.fy.resize(static_cast<size_t>(n));

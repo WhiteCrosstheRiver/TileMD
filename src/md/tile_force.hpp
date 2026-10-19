@@ -14,6 +14,13 @@ struct TileDeviceForces {
   std::vector<double> fz;
   double potential_energy = 0.0;
   double virial[6] = {};
+  // Per-atom virial in original-gid order. The sums are `virial`.
+  std::vector<double> wxx;
+  std::vector<double> wyy;
+  std::vector<double> wzz;
+  std::vector<double> wxy;
+  std::vector<double> wxz;
+  std::vector<double> wyz;
 };
 
 // One cluster's contribution on a thermo step. The host sums these after the

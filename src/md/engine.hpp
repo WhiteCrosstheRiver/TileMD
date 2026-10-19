@@ -38,6 +38,9 @@ struct HostSystem {
   // appends an extended-XYZ frame in original-gid order to `dump_path`.
   int dump_every = 0;
   std::string dump_path;
+  // 0 omits the column. 1 recomputes the six per-atom components at the dumped
+  // positions and writes them as virial:R:6 (xx, yy, zz, xy, xz, yz).
+  int dump_virial = 0;
   // Cluster tiles replace the atom neighbor list for forces and integration.
   // The default remains the atom-neighbor engine.
   bool use_cluster_tiles = false;

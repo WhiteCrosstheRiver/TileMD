@@ -1170,6 +1170,66 @@ TEST(GpuLj, DumpFramesReload) {
   }
 }
 
+double MaxVirialDelta(const tilemd::ref::ExtxyzFrame& frame, const tilemd::ref::Observables& obs) {
+  return std::max(MaxAbsDelta(frame.wxx, obs.wxx),
+                  std::max(MaxAbsDelta(frame.wyy, obs.wyy),
+                           std::max(MaxAbsDelta(frame.wzz, obs.wzz),
+                                    std::max(MaxAbsDelta(frame.wxy, obs.wxy),
+                                             std::max(MaxAbsDelta(frame.wxz, obs.wxz),
+                                                      MaxAbsDelta(frame.wyz, obs.wyz))))));
+}
+
+// dump_virial 1 writes the six per-atom components at the dumped positions.
+TEST(GpuLj, DumpVirialMatchesTheReference) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const tilemd::ref::System origin = LatticeBox();
+  const int n = static_cast<int>(origin.x.size());
+  std::vector<double> vx(static_cast<size_t>(n));
+  std::vector<double> vy(static_cast<size_t>(n));
+  std::vector<double> vz(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] = 0.02 * ((i % 5) - 2);
+    vy[static_cast<size_t>(i)] = 0.015 * ((i % 4) - 1);
+    vz[static_cast<size_t>(i)] = 0.01 * ((i % 3) - 1);
+  }
+  const bool tiles[] = {false, true};
+  for (bool use_tiles : tiles) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      (use_tiles ? "tilemd-fused-virial.extxyz" : "tilemd-atom-virial.extxyz");
+    std::filesystem::remove(path);
+    tilemd::HostSystem host = FromReference(origin, 0.3, 0, true);
+    host.use_cluster_tiles = use_tiles;
+    host.dt = 0.005;
+    host.mass = 1.0;
+    host.vx = vx;
+    host.vy = vy;
+    host.vz = vz;
+    host.dump_every = 2;
+    host.dump_virial = 1;
+    host.dump_path = path.string();
+    {
+      tilemd::Engine engine(std::move(host));
+      engine.Run(2);
+      for (int frame_index = 0; frame_index < 2; ++frame_index) {
+        const tilemd::ref::ExtxyzFrame frame =
+            tilemd::ref::ReadExtxyzFrame(path.string(), frame_index);
+        ASSERT_EQ(frame.wxx.size(), static_cast<size_t>(n));
+        tilemd::ref::System at = origin;
+        at.x = frame.system.x;
+        at.y = frame.system.y;
+        at.z = frame.system.z;
+        const tilemd::ref::Observables obs = tilemd::ref::Compute(at);
+        const double delta = MaxVirialDelta(frame, obs);
+        std::cout << std::scientific << std::setprecision(8) << "dump virial tiles "
+                  << std::boolalpha << use_tiles << " frame " << frame_index << " max |dw| "
+                  << delta << "\n";
+        EXPECT_LT(delta, 1.0e-12);
+      }
+    }
+    std::filesystem::remove(path);
+  }
+}
+
 // Two atoms 1e-100 apart overflow the LJ force. Run must abort,
 // name step 0 and the original atom, and leave emergency.extxyz behind.
 TEST(GpuLj, NonFiniteAbortWritesTheFrame) {
