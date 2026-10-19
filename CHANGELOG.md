@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- FP32 LJ pair function and cell-local minimum image. On boxes of length 32 and 33.5 the shadow delta matches the double minimum image. The fused atom-list force kernel builds as `tilemd_fp32_check` and is not the engine default yet.
 - Speed-phase baseline harness. `tilemd_bench` times `atom`, `fused-tile`, and `atom-ref` with the section 8 step counts. `bench/scripts/run_bench.py` writes the JSON and `reports/SPEED.md`.
 - Physical LJ fixtures. `boundary_500`, `dense_2000`, `twotype_2000`, and `dilute_1000` now keep every pair at least `0.85σ` apart. The old near-contact copies are in `tests/fixtures/stress/`.
 - T1-v2 and T4-v2 checks. The recorded double-path drift passes T4-v2. FP32 still has to pass it on its own series.

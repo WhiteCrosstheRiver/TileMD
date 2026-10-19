@@ -5,7 +5,11 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <string>
+
+#include "force/lj_pair.hpp"
+#include "force/shadow_delta.hpp"
 
 namespace {
 
@@ -305,4 +309,56 @@ TEST(LjReference, T4v2PassesTheRecordedDoubleDrift) {
   // Recorded six-digit slopes. LAMMPS standard error is 2.2e-10.
   EXPECT_TRUE(tilemd::ref::PassesT4v2(-3.5e-10, 1.5e-10, 2.2e-10));
   EXPECT_FALSE(tilemd::ref::PassesT4v2(-1.0e-8, 1.5e-10, 2.2e-10));
+}
+
+double WorstShadow(double length, int samples) {
+  const int nfull = static_cast<int>(std::floor(length / tilemd::kShadowCell));
+  const float rem = static_cast<float>(length - static_cast<double>(nfull) * tilemd::kShadowCell);
+  std::mt19937 rng(20261019);
+  std::uniform_real_distribution<double> dist(0.0, length);
+  double worst = 0.0;
+  for (int n = 0; n < samples; ++n) {
+    const double xi = dist(rng);
+    const double xj = dist(rng);
+    const float got =
+        tilemd::ShadowMinImage(tilemd::ShadowBin(xi), tilemd::ShadowLocal(xi),
+                               tilemd::ShadowBin(xj), tilemd::ShadowLocal(xj), nfull, rem);
+    const double ref = MinImage(xi - xj, length);
+    worst = std::max(worst, std::abs(static_cast<double>(got) - ref));
+  }
+  const double face = 1.0e-4;
+  const float across = tilemd::ShadowMinImage(tilemd::ShadowBin(face), tilemd::ShadowLocal(face),
+                                              tilemd::ShadowBin(length - face),
+                                              tilemd::ShadowLocal(length - face), nfull, rem);
+  const double across_ref = MinImage(face - (length - face), length);
+  worst = std::max(worst, std::abs(static_cast<double>(across) - across_ref));
+  return worst;
+}
+
+TEST(LjReference, ShadowDeltaMatchesMinimumImage) {
+  EXPECT_LT(WorstShadow(33.5, 4000), 2.0e-5);
+  EXPECT_LT(WorstShadow(32.0, 2000), 2.0e-5);
+}
+
+TEST(LjReference, PairFunctionMatchesTheOracle) {
+  const Shift shifts[] = {Shift::None, Shift::Energy, Shift::Force};
+  for (Shift shift : shifts) {
+    System system = PairAt(1.2, shift);
+    const Observables oracle = Compute(system);
+    const double rc = 2.5;
+    const double rc2 = rc * rc;
+    const double sr2 = 1.0 / rc2;
+    const double sr6 = sr2 * sr2 * sr2;
+    const double u_c = 4.0 * sr6 * (sr6 - 1.0);
+    const double s_rc = 24.0 / rc2 * sr6 * (2.0 * sr6 - 1.0);
+    const double u_shift = shift == Shift::None ? 0.0 : u_c;
+    const int shift_code = shift == Shift::Force ? 2 : (shift == Shift::Energy ? 1 : 0);
+    const double dx = system.x[0] - system.x[1];
+    const auto term =
+        tilemd::LjPair<double>(dx, 0.0, 0.0, 1.0, 4.0, 24.0, rc, rc2, u_shift, s_rc, shift_code);
+    EXPECT_NEAR(term.fx, oracle.fx[0], 1.0e-12);
+    EXPECT_NEAR(term.energy, oracle.energy[0], 1.0e-12);
+    EXPECT_NEAR(term.wxx, oracle.wxx[0], 1.0e-12);
+    EXPECT_NEAR(2.0 * term.pair_abs, oracle.pair_abs, 1.0e-12);
+  }
 }

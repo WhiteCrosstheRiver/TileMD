@@ -97,6 +97,11 @@ add_executable(tilemd_bench bench/tilemd_bench.cu)
 target_link_libraries(tilemd_bench PRIVATE tilemd_engine tilemd_reference)
 tilemd_apply_cuda_flags(tilemd_bench)
 
+# S1 FP32 atom-list force check. Not part of ctest and not linked into the bench.
+add_executable(tilemd_fp32_check bench/fp32_check.cu src/md/fused_atom.cu)
+target_link_libraries(tilemd_fp32_check PRIVATE tilemd_headers tilemd_reference)
+tilemd_apply_cuda_flags(tilemd_fp32_check)
+
 if(TILEMD_BUILD_TESTS)
   include(CTest)
   enable_testing()
