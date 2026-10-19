@@ -57,39 +57,42 @@ __global__ void __launch_bounds__(128)
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int slot = tid / kThreadsPerAtom;
   const int sub = tid - slot * kThreadsPerAtom;
-  if (slot >= n) return;
-
-  const float4 pi = pos[slot];
-  const int ix = ShadowAxis(__float_as_int(pi.w), 0);
-  const int iy = ShadowAxis(__float_as_int(pi.w), 1);
-  const int iz = ShadowAxis(__float_as_int(pi.w), 2);
+  const bool live = slot < n;
 
   float fx = 0.f, fy = 0.f, fz = 0.f, energy = 0.f;
   float wxx = 0.f, wyy = 0.f, wzz = 0.f, wxy = 0.f, wxz = 0.f, wyz = 0.f, pair_abs = 0.f;
-  const int count = nn[slot];
-  for (int k = sub; k < count; k += kThreadsPerAtom) {
-    const int j = nl[static_cast<long long>(k) * n + slot];
-    const float4 pj = pos[j];
-    const int jx = ShadowAxis(__float_as_int(pj.w), 0);
-    const int jy = ShadowAxis(__float_as_int(pj.w), 1);
-    const int jz = ShadowAxis(__float_as_int(pj.w), 2);
-    const float dx = ShadowMinImage(ix, pi.x, jx, pj.x, cells.nfull[0], cells.remainder[0]);
-    const float dy = ShadowMinImage(iy, pi.y, jy, pj.y, cells.nfull[1], cells.remainder[1]);
-    const float dz = ShadowMinImage(iz, pi.z, jz, pj.z, cells.nfull[2], cells.remainder[2]);
-    const LjTerm<float> term =
-        LjPair<float>(dx, dy, dz, pair.sigma2, pair.eps4, pair.eps24, pair.rc, pair.rc2,
-                      pair.u_shift, pair.s_rc, pair.shift);
-    fx += term.fx;
-    fy += term.fy;
-    fz += term.fz;
-    energy += term.energy;
-    wxx += term.wxx;
-    wyy += term.wyy;
-    wzz += term.wzz;
-    wxy += term.wxy;
-    wxz += term.wxz;
-    wyz += term.wyz;
-    pair_abs += term.pair_abs;
+  if (live) {
+    const float4 pi = pos[slot];
+    const int packed = __float_as_int(pi.w);
+    const int ix = ShadowAxis(packed, 0);
+    const int iy = ShadowAxis(packed, 1);
+    const int iz = ShadowAxis(packed, 2);
+    const int count = nn[slot];
+    for (int k = sub; k < count; k += kThreadsPerAtom) {
+      const int j = nl[static_cast<long long>(k) * n + slot];
+      const float4 pj = pos[j];
+      const int jpacked = __float_as_int(pj.w);
+      const float dx = ShadowMinImage(ix, pi.x, ShadowAxis(jpacked, 0), pj.x, cells.nfull[0],
+                                      cells.remainder[0]);
+      const float dy = ShadowMinImage(iy, pi.y, ShadowAxis(jpacked, 1), pj.y, cells.nfull[1],
+                                      cells.remainder[1]);
+      const float dz = ShadowMinImage(iz, pi.z, ShadowAxis(jpacked, 2), pj.z, cells.nfull[2],
+                                      cells.remainder[2]);
+      const LjTerm<float> term =
+          LjPair<float>(dx, dy, dz, pair.sigma2, pair.eps4, pair.eps24, pair.rc, pair.rc2,
+                        pair.u_shift, pair.s_rc, pair.shift);
+      fx += term.fx;
+      fy += term.fy;
+      fz += term.fz;
+      energy += term.energy;
+      wxx += term.wxx;
+      wyy += term.wyy;
+      wzz += term.wzz;
+      wxy += term.wxy;
+      wxz += term.wxz;
+      wyz += term.wyz;
+      pair_abs += term.pair_abs;
+    }
   }
 
 #pragma unroll
@@ -107,7 +110,7 @@ __global__ void __launch_bounds__(128)
     pair_abs += __shfl_xor_sync(0xffffffff, pair_abs, mask);
   }
 
-  if (sub == 0) {
+  if (live && sub == 0) {
     AtomOut row;
     row.fx = fx;
     row.fy = fy;
