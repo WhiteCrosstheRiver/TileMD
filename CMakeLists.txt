@@ -92,6 +92,11 @@ add_executable(tilemd_long_run tests/validation/long_run.cu)
 target_link_libraries(tilemd_long_run PRIVATE tilemd_engine)
 tilemd_apply_cuda_flags(tilemd_long_run)
 
+# PLAN section 8 timings stay out of ctest. One process is one timed run.
+add_executable(tilemd_bench bench/tilemd_bench.cu)
+target_link_libraries(tilemd_bench PRIVATE tilemd_engine tilemd_reference)
+tilemd_apply_cuda_flags(tilemd_bench)
+
 if(TILEMD_BUILD_TESTS)
   include(CTest)
   enable_testing()
