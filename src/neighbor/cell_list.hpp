@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 #include <vector>
+
+#include "neighbor/morton.hpp"
 
 namespace tilemd {
 
@@ -115,6 +118,44 @@ inline CellList BuildCellList(const double* box, const double* x, const double* 
     }
   }
   return out;
+}
+
+// `order[new_slot] = old_slot`. Cells match `BuildCellList`. Ties keep the old order.
+inline std::vector<int> MortonOrder(const double* box, const double* x, const double* y,
+                                    const double* z, int n, double reach) {
+  if (n <= 0) throw std::runtime_error("Morton order needs at least one atom");
+  if (!(reach > 0.0)) throw std::runtime_error("neighbor reach must be positive");
+  int ncell[3];
+  double edge[3];
+  for (int axis = 0; axis < 3; ++axis) {
+    if (!(box[axis] > 0.0)) throw std::runtime_error("box lengths must be positive");
+    ncell[axis] = std::max(1, static_cast<int>(std::floor(box[axis] / reach)));
+    edge[axis] = box[axis] / static_cast<double>(ncell[axis]);
+  }
+  const double* coordinates[3] = {x, y, z};
+  std::vector<std::pair<int, int>> keys(n);
+  for (int i = 0; i < n; ++i) {
+    int cell[3];
+    for (int axis = 0; axis < 3; ++axis) {
+      int bin = static_cast<int>(std::floor(coordinates[axis][i] / edge[axis]));
+      if (bin < 0) bin = 0;
+      if (bin >= ncell[axis]) bin = ncell[axis] - 1;
+      cell[axis] = bin;
+    }
+    keys[i] = {MortonCell(cell[0], cell[1], cell[2]), i};
+  }
+  std::stable_sort(keys.begin(), keys.end());
+  std::vector<int> order(n);
+  for (int i = 0; i < n; ++i) order[i] = keys[i].second;
+  return order;
+}
+
+template <typename T>
+inline void ApplyOrder(std::vector<T>* values, const std::vector<int>& order) {
+  if (values->size() != order.size()) throw std::runtime_error("order and values differ in length");
+  std::vector<T> next(order.size());
+  for (int i = 0; i < static_cast<int>(order.size()); ++i) next[i] = (*values)[order[i]];
+  *values = std::move(next);
 }
 
 }  // namespace tilemd

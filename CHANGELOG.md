@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Morton slot order for the FP32 neighbor list, using the engine's 10-bit code. After a shuffle of an 864-atom fcc, neighbor slots are closer together and the pair set is unchanged.
 - LAMMPS dump reader for the FP32 bench. The 32k melt frame has 32000 atoms, box length 33.591923827650149, and the recorded first velocity. `tilemd_fp32_bench --dump` uses that frame and has not been launched.
 - Host cell neighbor list for the FP32 path. On a displaced 864-atom fcc it matches the all-pairs list, including a pair that meets through a periodic face. `tilemd_fp32_bench` times the fused step from that list and has not been launched.
 - FP32 fused kick-drift step. The steps are queued and the host syncs once at the end. `tilemd_fp32_check` compares five steps at one thread per atom with the host walk. That binary is compiled and has not been launched.

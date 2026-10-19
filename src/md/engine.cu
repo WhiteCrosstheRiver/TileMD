@@ -24,6 +24,7 @@
 #include "md/tile_thermo.hpp"
 #include "neighbor/cluster_list.hpp"
 #include "neighbor/cluster_order.hpp"
+#include "neighbor/morton.hpp"
 
 namespace tilemd {
 
@@ -97,22 +98,6 @@ __device__ T LoadReadOnly(const T* ptr) {
 
 __device__ double MinImageDouble(double delta, double length) {
   return delta - length * rint(delta / length);
-}
-
-// 10-bit Morton code. Stage-1 boxes stay under 1024 cells per axis.
-__host__ __device__ unsigned Spread10(unsigned v) {
-  v &= 0x3ffu;
-  v = (v | (v << 16)) & 0x030000FFu;
-  v = (v | (v << 8)) & 0x0300F00Fu;
-  v = (v | (v << 4)) & 0x030C30C3u;
-  v = (v | (v << 2)) & 0x09249249u;
-  return v;
-}
-
-__host__ __device__ int MortonCell(int ix, int iy, int iz) {
-  unsigned code = Spread10(static_cast<unsigned>(ix)) | (Spread10(static_cast<unsigned>(iy)) << 1) |
-                  (Spread10(static_cast<unsigned>(iz)) << 2);
-  return static_cast<int>(code);
 }
 
 __device__ int CellCoord(double x, double inv_edge, int ncell) {

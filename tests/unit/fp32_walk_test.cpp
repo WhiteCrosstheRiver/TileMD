@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -213,6 +215,48 @@ TEST(Fp32Walk, MeltDumpHasTheBaselineAtoms) {
   EXPECT_NEAR(frame.box[0], 33.591923827650149, 1e-12);
   EXPECT_NEAR(frame.x[0], 0.0, 0.0);
   EXPECT_NEAR(frame.vx[0], 0.55710519079511855, 1e-15);
+}
+
+double MeanNeighborGap(const tilemd::CellList& list, int n) {
+  double sum = 0.0;
+  int count = 0;
+  for (int i = 0; i < n; ++i) {
+    for (int k = 0; k < list.nn[i]; ++k) {
+      sum += std::abs(list.nl[static_cast<std::size_t>(k) * n + i] - i);
+      ++count;
+    }
+  }
+  return count == 0 ? 0.0 : sum / static_cast<double>(count);
+}
+
+TEST(Fp32Walk, MortonOrderPullsNeighborsTogether) {
+  std::vector<double> x, y, z;
+  double length = 0;
+  MakeFcc(6, &x, &y, &z, &length);
+  const int n = static_cast<int>(x.size());
+  std::vector<int> shuffled(n);
+  std::iota(shuffled.begin(), shuffled.end(), 0);
+  std::mt19937 rng(20261019);
+  std::shuffle(shuffled.begin(), shuffled.end(), rng);
+  tilemd::ApplyOrder(&x, shuffled);
+  tilemd::ApplyOrder(&y, shuffled);
+  tilemd::ApplyOrder(&z, shuffled);
+  const double box[3] = {length, length, length};
+  const tilemd::CellList before = tilemd::BuildCellList(box, x.data(), y.data(), z.data(), n, 2.8);
+  const std::vector<int> order = tilemd::MortonOrder(box, x.data(), y.data(), z.data(), n, 2.8);
+  tilemd::ApplyOrder(&x, order);
+  tilemd::ApplyOrder(&y, order);
+  tilemd::ApplyOrder(&z, order);
+  const tilemd::CellList after = tilemd::BuildCellList(box, x.data(), y.data(), z.data(), n, 2.8);
+  EXPECT_LT(MeanNeighborGap(after, n), MeanNeighborGap(before, n));
+  std::vector<int> nn, nl;
+  FillNeighbors(x, y, z, length, 2.8, 256, &nn, &nl);
+  for (int i = 0; i < n; ++i) {
+    std::vector<int> brute;
+    for (int k = 0; k < nn[i]; ++k) brute.push_back(nl[static_cast<std::size_t>(k) * n + i]);
+    std::sort(brute.begin(), brute.end());
+    EXPECT_EQ(Row(after, i, n), brute) << i;
+  }
 }
 
 TEST(Fp32Walk, CellListSeesThePeriodicFace) {

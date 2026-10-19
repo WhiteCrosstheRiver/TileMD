@@ -84,6 +84,13 @@ int main(int argc, char** argv) {
       vz.assign(count, 0.01);
     }
     const int n = static_cast<int>(x.size());
+    const std::vector<int> order = tilemd::MortonOrder(box, x.data(), y.data(), z.data(), n, 2.8);
+    tilemd::ApplyOrder(&x, order);
+    tilemd::ApplyOrder(&y, order);
+    tilemd::ApplyOrder(&z, order);
+    tilemd::ApplyOrder(&vx, order);
+    tilemd::ApplyOrder(&vy, order);
+    tilemd::ApplyOrder(&vz, order);
     const tilemd::CellList list = tilemd::BuildCellList(box, x.data(), y.data(), z.data(), n, 2.8);
     std::vector<int> ix(n, 0), iy(n, 0), iz(n, 0);
     const std::vector<double> x_ref = x, y_ref = y, z_ref = z;
