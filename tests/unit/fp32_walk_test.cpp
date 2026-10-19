@@ -318,6 +318,47 @@ TEST(Fp32Walk, SkinListMatchesTheOracleAfterManySteps) {
   ExpectForceMatches(box, x, y, z, skin.list);
 }
 
+double TotalEnergy(const double* box, const std::vector<double>& x, const std::vector<double>& y,
+                   const std::vector<double>& z, const std::vector<double>& vx,
+                   const std::vector<double>& vy, const std::vector<double>& vz) {
+  const int n = static_cast<int>(x.size());
+  const tilemd::CellList list = tilemd::BuildCellList(box, x.data(), y.data(), z.data(), n, 2.5);
+  const tilemd::Fp32Walk force = tilemd::HostFp32Force(box, x.data(), y.data(), z.data(),
+                                                       list.nn.data(), list.nl.data(), n, UnitLj());
+  double kinetic = 0.0;
+  for (int i = 0; i < n; ++i) {
+    kinetic += 0.5 * (vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
+  }
+  return kinetic + force.potential_energy;
+}
+
+TEST(Fp32Walk, SkinNveDriftsSlowly) {
+  std::vector<double> x, y, z;
+  double length = 0;
+  MakeFcc(4, &x, &y, &z, &length);
+  const int n = static_cast<int>(x.size());
+  for (int i = 0; i < n; ++i) {
+    x[i] += 0.07 * std::sin(0.7 * i);
+    y[i] += 0.05 * std::cos(0.3 * i);
+    z[i] += 0.04 * std::sin(0.5 * i + 1.0);
+    x[i] -= length * std::floor(x[i] / length);
+    y[i] -= length * std::floor(y[i] / length);
+    z[i] -= length * std::floor(z[i] / length);
+  }
+  const double box[3] = {length, length, length};
+  std::vector<double> vx(n, 0.2), vy(n, -0.1), vz(n, 0.05);
+  std::vector<int> ix(n, 0), iy(n, 0), iz(n, 0);
+  const double start = TotalEnergy(box, x, y, z, vx, vy, vz);
+  const tilemd::Fp32SkinStats skin = tilemd::HostFp32SkinSteps(
+      box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(), ix.data(), iy.data(),
+      iz.data(), n, UnitLj(), 0.005, 1.0, 0.3, 1000);
+  const double end = TotalEnergy(box, x, y, z, vx, vy, vz);
+  const double rel = std::abs(end - start) / std::max(std::abs(start), 1.0);
+  EXPECT_GT(skin.rebuilds, 0);
+  // Measured 2.8e-4 on this displaced 256-atom lattice. A broken list jumps much further.
+  EXPECT_LT(rel, 5.0e-4) << start << " -> " << end << " rel " << rel;
+}
+
 TEST(Fp32Walk, RebuildStoresMortonSlotOrder) {
   std::vector<double> x, y, z;
   double length = 0;
