@@ -32,4 +32,4 @@ On Windows, `scripts/check.sh` loads the Visual Studio C++ environment and confi
 
 ## Layout
 
-Engine code lives under `src/`. The CPU oracle will live in `reference/`. Tests, fixtures, and benchmark inputs have directories ready for M1–M3. Empty directories are placeholders; see [docs/PLAN.md](docs/PLAN.md) section 3.
+Engine code lives under `src/`. The M3 GPU engine is `src/md/engine.cu` (thread-per-atom neighbor list, LJ force, velocity Verlet). The double-precision LJ oracle is `reference/lj_reference.cpp`; `tilemd_make_fixtures` regenerates `tests/fixtures`. GPU correctness tests are `tests/gpu/lj_gpu_test.cu`, run with `bash scripts/gpu_check.sh M3`. See [docs/PLAN.md](docs/PLAN.md) section 3.

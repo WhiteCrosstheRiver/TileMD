@@ -32,6 +32,11 @@ function(tilemd_apply_cuda_flags target)
     $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
   )
+  # CCCL (CUB) rejects MSVC's traditional preprocessor.
+  if(MSVC)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
+  endif()
   if(TILEMD_FAST_MATH)
     target_compile_options(${target} PRIVATE
       $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
@@ -49,8 +54,57 @@ target_include_directories(tilemd_headers INTERFACE
   ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 add_executable(tilemd src/main.cu)
-target_link_libraries(tilemd PRIVATE tilemd_headers)
+target_link_libraries(tilemd PRIVATE tilemd_headers tilemd_io)
 tilemd_apply_cuda_flags(tilemd)
+
+add_library(tilemd_reference STATIC reference/lj_reference.cpp reference/tf32_pair.cpp)
+target_include_directories(tilemd_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/reference
+                                           PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(tilemd_reference PUBLIC cxx_std_17)
+
+add_executable(tilemd_make_fixtures reference/make_fixtures.cpp)
+target_link_libraries(tilemd_make_fixtures PRIVATE tilemd_reference)
+
+add_library(tilemd_io STATIC src/io/input.cpp src/io/run.cpp)
+target_link_libraries(tilemd_io PUBLIC tilemd_headers tilemd_reference)
+target_compile_features(tilemd_io PUBLIC cxx_std_17)
+
+add_library(tilemd_eam STATIC src/force/eam.cpp)
+target_link_libraries(tilemd_eam PUBLIC tilemd_headers)
+target_compile_features(tilemd_eam PUBLIC cxx_std_17)
+target_link_libraries(tilemd_io PUBLIC tilemd_eam)
+
+add_library(tilemd_cluster STATIC src/neighbor/cluster_list.cpp src/md/emergency.cpp)
+target_link_libraries(tilemd_cluster PUBLIC tilemd_headers)
+target_compile_features(tilemd_cluster PUBLIC cxx_std_17)
+target_link_libraries(tilemd_io PUBLIC tilemd_cluster)
+
+add_library(tilemd_attention STATIC src/force/lj_attention.cu src/force/eam_attention.cu)
+target_link_libraries(tilemd_attention PUBLIC tilemd_headers tilemd_cluster)
+tilemd_apply_cuda_flags(tilemd_attention)
+
+add_library(tilemd_engine STATIC src/md/engine.cu src/md/tile_force.cu src/md/tile_rebuild.cu)
+target_link_libraries(tilemd_engine PUBLIC tilemd_headers tilemd_cluster)
+tilemd_apply_cuda_flags(tilemd_engine)
+
+# T4 and T5 are multi-minute runs, so they stay out of ctest.
+add_executable(tilemd_long_run tests/validation/long_run.cu)
+target_link_libraries(tilemd_long_run PRIVATE tilemd_engine)
+tilemd_apply_cuda_flags(tilemd_long_run)
+
+# PLAN section 8 timings stay out of ctest. One process is one timed run.
+add_executable(tilemd_bench bench/tilemd_bench.cu)
+target_link_libraries(tilemd_bench PRIVATE tilemd_engine tilemd_reference)
+tilemd_apply_cuda_flags(tilemd_bench)
+
+# S1 FP32 atom-list force check. Not part of ctest and not linked into the bench.
+add_executable(tilemd_fp32_check bench/fp32_check.cu src/md/fused_atom.cu)
+target_link_libraries(tilemd_fp32_check PRIVATE tilemd_headers tilemd_reference)
+tilemd_apply_cuda_flags(tilemd_fp32_check)
+
+add_executable(tilemd_fp32_bench bench/fp32_bench.cu src/md/fused_atom.cu)
+target_link_libraries(tilemd_fp32_bench PRIVATE tilemd_headers)
+tilemd_apply_cuda_flags(tilemd_fp32_bench)
 
 if(TILEMD_BUILD_TESTS)
   include(CTest)
@@ -69,11 +123,22 @@ if(TILEMD_BUILD_TESTS)
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   FetchContent_MakeAvailable(googletest)
 
-  add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp)
-  target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers)
+  add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp tests/unit/lj_reference_test.cpp
+                                 tests/unit/fp32_walk_test.cpp
+                                 tests/unit/cluster_list_test.cpp                                  tests/unit/integrator_test.cpp
+                                 tests/unit/tf32_pair_test.cpp
+                                 tests/unit/pair_attention_test.cpp
+                                 tests/unit/input_test.cpp
+                                 tests/unit/drift_32k_test.cpp)
+  target_link_libraries(tilemd_cpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_reference
+                                                 tilemd_cluster tilemd_eam tilemd_io)
+  file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}" TILEMD_SOURCE_DIR_FWD)
+  target_compile_definitions(tilemd_cpu_tests PRIVATE TILEMD_SOURCE_DIR="${TILEMD_SOURCE_DIR_FWD}")
 
-  add_executable(tilemd_gpu_tests tests/unit/gpu_smoke.cu)
-  target_link_libraries(tilemd_gpu_tests PRIVATE GTest::gtest_main tilemd_headers)
+  add_executable(tilemd_gpu_tests tests/unit/gpu_smoke.cu tests/gpu/lj_gpu_test.cu)
+  target_link_libraries(tilemd_gpu_tests PRIVATE GTest::gtest_main tilemd_headers tilemd_engine
+                                                 tilemd_reference tilemd_attention tilemd_eam)
+  target_compile_definitions(tilemd_gpu_tests PRIVATE TILEMD_SOURCE_DIR="${TILEMD_SOURCE_DIR_FWD}")
   tilemd_apply_cuda_flags(tilemd_gpu_tests)
 
   add_test(NAME cpu_smoke COMMAND tilemd_cpu_tests)

@@ -1,0 +1,58 @@
+{
+  "code": "tilemd",
+  "code_version": "parent b2916fb72c5313690b9604d2abbfbcc690406d82 plus the force-block sweep",
+  "milestone": "M4",
+  "env": {
+    "gpu_name": "NVIDIA GeForce RTX 3050",
+    "compute_capability": "8.6",
+    "driver": "610.47",
+    "cuda_version": "Cuda compilation tools, release 13.2, V13.2.78",
+    "cpu": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "clocks_locked": false,
+    "note": "SM clock was queried idle after the run (240 MHz). Max SM clock is 2100 MHz. Clocks were not locked during the timing."
+  },
+  "system": {
+    "name": "lj_melt",
+    "N": 32000,
+    "rho": 0.8442,
+    "rc": 2.5,
+    "skin": 0.3,
+    "dt": 0.005
+  },
+  "settings": {
+    "list": "full",
+    "graph_unroll": 50,
+    "block_size": 128,
+    "rebuild_every_step": false
+  },
+  "protocol": "Shorter than section 8. Warmup was Run(50), then three consecutive Run(200) intervals. The recorded time is their median. The section 8 length at 32k is 100000 steps.",
+  "runs": [
+    {
+      "steps": 200,
+      "t_loop_s": 1.4306281,
+      "atom_steps_per_s": 4473559.55,
+      "note": "median of three consecutive intervals; the three raw times were not stored"
+    }
+  ],
+  "median_atom_steps_per_s": 4473559.55,
+  "force_kernel": {
+    "note": "Median of three CUDA-event intervals of 40 launches after one warmup. This is force evaluations, not a full timestep. Float forces at 64 and 256 matched block 128 on the 32k melt.",
+    "melt_32k": [
+      {"block_size": 64, "repeats": 40, "median_s": 0.216221695, "atom_steps_per_s": 5919850.0},
+      {"block_size": 128, "repeats": 40, "median_s": 0.162202621, "atom_steps_per_s": 7891364.45},
+      {"block_size": 256, "repeats": 40, "median_s": 0.171658234, "atom_steps_per_s": 7456676.98}
+    ],
+    "fcc_256k": {
+      "name": "fcc",
+      "N": 256000,
+      "rho": 0.8442,
+      "note": "Lattice force kernel only. Not a melt and not a full timestep.",
+      "samples": [
+        {"block_size": 64, "repeats": 40, "median_s": 1.38737048, "atom_steps_per_s": 7380869.15},
+        {"block_size": 128, "repeats": 40, "median_s": 1.18805505, "atom_steps_per_s": 8619129.2},
+        {"block_size": 256, "repeats": 40, "median_s": 1.30297961, "atom_steps_per_s": 7858910.37}
+      ]
+    }
+  },
+  "not_measured": ["2M", "16M", "Nsight", "GPUMD", "LAMMPS-KOKKOS", "H100", "A100"]
+}

@@ -15,6 +15,8 @@ struct DeviceStatus {
   // Non-negative displacement stored as IEEE bits so a kernel can atomicMax
   // the field as an int. Ordered for values >= 0.
   float max_disp2_bits;
+  // Device slot of the first non-finite atom. Meaningful when nan_detected is set.
+  int nan_slot;
 };
 
 static_assert(sizeof(int) == 4, "max_disp2 bit trick assumes a 32-bit int");

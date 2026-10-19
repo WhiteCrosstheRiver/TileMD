@@ -1,0 +1,39 @@
+{
+  "code": "tilemd",
+  "code_version": "parent 9d8d08f plus the graph-unroll sweep",
+  "milestone": "M4",
+  "env": {
+    "gpu_name": "NVIDIA GeForce RTX 3050",
+    "compute_capability": "8.6",
+    "clocks_locked": false,
+    "note": "Clocks were not locked. The timed Run includes CUDA graph capture."
+  },
+  "system": {
+    "name": "lj_melt",
+    "N": 32000,
+    "rho": 0.8442,
+    "rc": 2.5,
+    "skin": 0.3,
+    "dt": 0.005
+  },
+  "settings": {
+    "list": "full",
+    "graph_unroll_swept": [1, 10, 50, 200],
+    "graph_unroll_default": 50,
+    "block_size": 128,
+    "rebuild_every_step": false
+  },
+  "protocol": "Shorter than section 8. Warmup was Run(50) at 32k and Run(20) at 256k, then three consecutive Run(200) intervals. 200 is a multiple of every swept width, so the captured graph is that width. K=1 and K=200 matched bitwise over 200 steps on the 32k melt. The default stays 50.",
+  "melt_32k": [
+    {"graph_unroll": 1, "samples_s": [1.45937200, 1.38855710, 1.41276150], "median_s": 1.41276150, "atom_steps_per_s": 4.53013478e6},
+    {"graph_unroll": 10, "samples_s": [1.44367020, 1.39963670, 1.39890490], "median_s": 1.39963670, "atom_steps_per_s": 4.57261517e6},
+    {"graph_unroll": 50, "samples_s": [1.42923570, 1.39850820, 1.40518560], "median_s": 1.40518560, "atom_steps_per_s": 4.55455849e6},
+    {"graph_unroll": 200, "samples_s": [1.46636050, 1.42191320, 1.46788030], "median_s": 1.46636050, "atom_steps_per_s": 4.36454746e6}
+  ],
+  "fcc_256k": [
+    {"graph_unroll": 1, "samples_s": [7.07837660, 7.02668430, 7.05852270], "median_s": 7.05852270, "atom_steps_per_s": 7.25364247e6},
+    {"graph_unroll": 10, "samples_s": [7.08703230, 7.08782150, 7.07696160], "median_s": 7.08703230, "atom_steps_per_s": 7.22446263e6},
+    {"graph_unroll": 50, "samples_s": [7.12117660, 7.10298930, 7.09536460], "median_s": 7.10298930, "atom_steps_per_s": 7.20823274e6},
+    {"graph_unroll": 200, "samples_s": [7.22230920, 7.15458690, 7.12865180], "median_s": 7.15458690, "atom_steps_per_s": 7.15624825e6}
+  ]
+}

@@ -2,7 +2,16 @@
 
 Fixed decisions live in [PLAN.md](PLAN.md) section 2. This file records changes to those decisions. Each change needs the measurement that justified it.
 
-No changes yet.
-
 | ID | Date | Change | Evidence | Supersedes |
 |---|---|---|---|---|
+| D3 | 2026-10-19 | EAM uses LAMMPS metal units (eV, Å). Lennard-Jones stays in reduced units. | `Cu_u3.eam` forces match LAMMPS `pair_style eam` to 1.4e-13 relative on the 108-atom cell in `reports/M8.md`. | D3's postponement of metal units, for the EAM comparison only. |
+| D17 | 2026-10-19 | `pos4.w` stores the shadow cell, not the type. xyz is the offset from a cell of edge 4. | On `melt_4000` shifted by 256, absolute binary32 force error is `1.64e-3`. The cell-local shadow is `9.14e-6`, inside T1. See `reports/M6.md`. | The type-as-int-bits field in D4 and the §5.1 note that w holds type bits. The type array is unchanged. |
+| D4-v2 | 2026-10-19 | The production force path is FP32 end to end: geometry, pair math, and per-thread accumulation. Double remains for the master coordinates and velocities and for global reductions. The existing double kernels stay as the reference GPU path for tests. | Review #1. Not yet measured on the FP32 path. | The double geometry inside every production pair loop. |
+| D18 | 2026-10-19 | Force coordinates are a per-atom float offset from a cell origin whose edge is an exact power-of-two multiple chosen per box, plus an integer cell index. The pair vector is `float(cell_j − cell_i + image·ncell)·edge + (o_j − o_i)`. | Generalises D17. The integer part is exact; the error is about one ulp of the edge. | The fixed edge of 4 when a power-of-two edge fits the box better. |
+| D19 | 2026-10-19 | Per-atom arrays stay in sorted slot order. `gid` is used only for output. Reordering happens at a rebuild. | Review #1. The fused kernel was gathering through `gid`. | Gathers of neighbor state through `gid` inside the pair loop. |
+| D20 | 2026-10-19 | T1-v2 for FP32 paths: `rms(\|ΔF\|)/rms(\|F\|) ≤ 1e-5` and `max\|ΔF\|/rms(\|F\|) ≤ 2e-4`, potential energy relative ≤ 1e-6, virial relative to `Σ\|r·F\|` ≤ 1e-5. Double paths keep the old T1. T4-v2 passes when `\|slope_TileMD\| ≤ max(2·\|slope_LAMMPS\|, 3·SE_LAMMPS)` on 17-digit series. G1 is passed for the recorded double-path drift. | Recorded slopes −3.5e-10 and +1.5e-10, with standard errors 2.4e-10 and 2.2e-10. 3.5e-10 ≤ 3 × 2.2e-10. | The old T1 max-error ratio and the old T4 slope-ratio gate, for the double reference path. The FP32 path must pass T4-v2 again. |
+| D21 | 2026-10-19 | FP32 tests use fixtures with `r_min ≥ 0.85σ`. The old near-contact fixtures stay under `tests/fixtures/stress/` for the double oracle and the reference GPU path only. | `boundary_500` pairs at 0.002σ made forces ~1e30 and forced double geometry. | Using `boundary_500`, `dense_2000`, `twotype_2000`, and `dilute_1000` as FP32 acceptance fixtures. |
+| D22 | 2026-10-19 | The engine default for `rebuild_every_step` is false. | Review #1. A skin check already decides rebuilds on the device. | The default `true` in `engine.hpp`. |
+| D23 | 2026-10-19 | The default LJ path is whichever of the atom-list FP32 step and tiles v2 is faster. The choice is recorded here after the race. | Not measured yet. | A fixed cluster-tile default for LJ. |
+| D24 | 2026-10-19 | Production force kernels use 128 or 256 threads per block. One-warp blocks are not used in production. | Review #1. `__launch_bounds__(32)` capped occupancy. | One-warp production launches. |
+| D25 | 2026-10-19 | Feature freeze until S-G2. Allowed work is tests, benchmarks, refactors, and performance. | Review #1. The mission metric is atom-steps/s. | New potentials and new integrator features before S-G2. |

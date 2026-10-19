@@ -1,0 +1,15 @@
+Nsight Compute 2026.1.1, one launch, clocks not fixed.
+Command: ncu -k regex:TileForceKernel --launch-skip 1 -c 1 --metrics dram__bytes.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,launch__registers_per_thread --clock-control none
+Binary: build-m8/tilemd_gpu_tests.exe --gtest_filter=GpuLj.TilePathRates
+GPU: NVIDIA GeForce RTX 3050, CC 8.6
+
+Kernel: TileForceKernel<1>
+Grid (32000, 1, 1) x (32, 1, 1)
+The first TileForceKernel on this test is the forces-only instantiation. This is the next one, the fused integrator, on the 32k melt.
+The grid is the atom count. Warps past the live cluster count return immediately.
+
+dram__bytes.sum                                      30.10 Mbyte
+launch__registers_per_thread                         78 register/thread
+sm__throughput.avg.pct_of_peak_sustained_elapsed     85.90 %
+
+30.10e6 bytes / 32000 atoms = 941 bytes/atom.

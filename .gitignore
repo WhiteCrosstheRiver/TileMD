@@ -12,9 +12,11 @@ __pycache__/
 *.pyc
 .venv/
 *.dump
+!tests/validation/lammps_ref/init_32k.dump
 *.lammpstrj
 dumps/
 scratch/
+bench/inputs/gpumd/generated/
 .DS_Store
 .idea/
 .vscode/

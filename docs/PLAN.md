@@ -1,3 +1,5 @@
+Superseded in part by docs/REVIEW_AND_PLAN_v2.md
+
 # TileMD — Implementation Plan (Stage 1: LJ validation engine)
 
 > **Audience:** the coding agent(s) implementing this engine, and the reviewer (Claude) who will review every pull request on GitHub.
@@ -10,15 +12,15 @@
 
 | Milestone | Branch | State | Gate | PR | Notes |
 |---|---|---|---|---|---|
-| M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local `check.sh` and `gpu_check.sh` passed. GitHub remote not created (`gh` is not installed). |
+| M0 Repo bootstrap | `m0-bootstrap` | in progress | — | | Local check passed. The input parser runs the CPU reference. No pull request yet. |
 | M1 Baselines (GPUMD, LAMMPS-KOKKOS) | `m1-baselines` | not started | — | | |
-| M2 CPU reference oracle | `m2-cpu-reference` | not started | G1-ref | | |
-| M3 GPU v0 (correct, simple) | `m3-gpu-v0` | not started | G1 | | |
-| M4 Performance foundation | `m4-perf-foundation` | not started | G2, G3 | | |
-| M5 Cluster-pair tiles (SIMT) | `m5-cluster-tiles` | not started | G2+ | | |
-| M6 Fused single-kernel timestep | `m6-fused-step` | not started | G2+, G3+ | | |
-| M7 Tensor-core pair-attention tile | `m7-tensor-core` | not started | G4 | | |
-| M8 Generic pair-attention API + EAM | `m8-pair-attention-api` | not started | G5 | | |
+| M2 CPU reference oracle | `m2-cpu-reference` | in progress | G1-ref | | CPU oracle matches LAMMPS. Gate G1-ref passed locally. No pull request yet. |
+| M3 GPU v0 (correct, simple) | `m3-gpu-v0` | in progress | G1 | | Double-path drift passes T4-v2, so G1 is passed. The old slope ratio was 2.33. |
+| M4 Performance foundation | `m4-perf-foundation` | in progress | G2, G3 | | Graphs, device rebuild, and block 128 are in. The 2M run and Nsight Systems remain open. |
+| M5 Cluster-pair tiles (SIMT) | `m5-cluster-tiles` | in progress | G2+ | | Tiles match the oracle. Efficiency is about 0.09, and the tile run is slower. |
+| M6 Fused single-kernel timestep | `m6-fused-step` | in progress | G2+, G3+ | | Fused leapfrog matches a small CPU run. On this 3050 it is slower than the atom path. |
+| M7 Tensor-core pair-attention tile | `m7-tensor-core` | in progress | G4 | | CPU 3×TF32 misses T1 and is off the default path. No tensor-core kernel. |
+| M8 Generic pair-attention API + EAM | `m8-pair-attention-api` | in progress | G5 | | EAM matches LAMMPS. Device kernels launched. The G5 overhead gate was missed. |
 
 States: `not started` → `in progress` → `in review` → `changes requested` → `merged`.
 
@@ -165,7 +167,7 @@ For a pair of types (a, b) with parameters ε_ab, σ_ab, cutoff r_c,ab:
 | `x` | `double3` (SoA: 3 × double[N] recommended) | N | master positions, wrapped |
 | `v` | `double3` SoA | N | velocities |
 | `img` | `int3` | N | image counters for unwrapped coordinates |
-| `pos4` | `float4` | N | shadow: x, y, z (float), w = type bits (`__int_as_float`) |
+| `pos4` | `float4` | N | shadow: xyz is the offset from a cell of edge 4, w is the packed cell (`__int_as_float`). The type stays in the type array. |
 | `f` | `float3` SoA (M3–M5); removed in M6 | N | forces |
 | `gid` | `int` | N | original global ID of the atom at this sorted slot |
 | `slot_of_gid` | `int` | N | inverse permutation (for output) |
@@ -680,6 +682,7 @@ timestep       0.005
 ensemble       nve                      # nve | langevin T gamma seed
 thermo_every   100
 dump_every     0                        # 0 = off
+dump_virial    0                        # 1 writes per-atom virial on dump frames
 graph_unroll   50
 run            10000
 ```

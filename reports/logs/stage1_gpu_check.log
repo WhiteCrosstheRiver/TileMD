@@ -1,0 +1,39 @@
+Running main() from C:\Users\ZemengFeng\Desktop\codes\TileMD\build-m8\_deps\googletest-src\googletest\src\gtest_main.cc
+[==========] Running 12 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 1 test from GpuSmoke
+[ RUN      ] GpuSmoke.LaunchesOrSkips
+[       OK ] GpuSmoke.LaunchesOrSkips (111 ms)
+[----------] 1 test from GpuSmoke (111 ms total)
+
+[----------] 11 tests from GpuLj
+[ RUN      ] GpuLj.FixturesMatchReference
+[       OK ] GpuLj.FixturesMatchReference (1670 ms)
+[ RUN      ] GpuLj.ShiftAndMinimumImage
+[       OK ] GpuLj.ShiftAndMinimumImage (9 ms)
+[ RUN      ] GpuLj.DeterministicNve
+[       OK ] GpuLj.DeterministicNve (83959 ms)
+[ RUN      ] GpuLj.SkinRebuildMatchesEveryStep
+[       OK ] GpuLj.SkinRebuildMatchesEveryStep (5194 ms)
+[ RUN      ] GpuLj.OverflowIsDetectedThenGrows
+[       OK ] GpuLj.OverflowIsDetectedThenGrows (21 ms)
+[ RUN      ] GpuLj.ShortNveMatchesLammps
+T3 mean pe -5.76748 lammps -5.76687 stderr 0.100594
+T3 mean ke 1.14814 lammps 1.1475 stderr 0.101184
+T3 mean P 0.225424 lammps 0.230609 stderr 0.524539
+[       OK ] GpuLj.ShortNveMatchesLammps (59275 ms)
+[ RUN      ] GpuLj.ClusterTileMatchesOracle
+[       OK ] GpuLj.ClusterTileMatchesOracle (3 ms)
+[ RUN      ] GpuLj.AttentionKernelMatchesOracle
+[       OK ] GpuLj.AttentionKernelMatchesOracle (2192 ms)
+[ RUN      ] GpuLj.DeviceClusterRebuildMatchesTheHostList
+[       OK ] GpuLj.DeviceClusterRebuildMatchesTheHostList (4 ms)
+[ RUN      ] GpuLj.EamFuncflKernelMatchesTheLaneWalk
+[       OK ] GpuLj.EamFuncflKernelMatchesTheLaneWalk (7 ms)
+[ RUN      ] GpuLj.EamSetflKernelMatchesTheLaneWalk
+[       OK ] GpuLj.EamSetflKernelMatchesTheLaneWalk (7 ms)
+[----------] 11 tests from GpuLj (152345 ms total)
+
+[----------] Global test environment tear-down
+[==========] 12 tests from 2 test suites ran. (152457 ms total)
+[  PASSED  ] 12 tests.
