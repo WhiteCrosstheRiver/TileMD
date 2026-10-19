@@ -1293,6 +1293,71 @@ TEST(GpuLj, NonFiniteAbortWritesTheFrame) {
   std::cout << "emergency frame: " << count << " | " << comment << "\n";
 }
 
+// The fused step flags the same overflow. Both the per-step loop and one
+// captured graph must abort and leave the frame.
+TEST(GpuLj, FusedNonFiniteAbortWritesTheFrame) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const std::filesystem::path emergency = "emergency.extxyz";
+  const bool rebuilds[] = {true, false};
+  for (bool rebuild_every_step : rebuilds) {
+    std::filesystem::remove(emergency);
+    struct RemoveFile {
+      std::filesystem::path path;
+      ~RemoveFile() { std::filesystem::remove(path); }
+    } guard{emergency};
+
+    tilemd::HostSystem host;
+    host.box[0] = host.box[1] = host.box[2] = 30.0;
+    host.skin = 0.3;
+    host.dt = 0.005;
+    host.mass = 1.0;
+    host.use_cluster_tiles = true;
+    host.rebuild_every_step = rebuild_every_step;
+    host.type = {0, 0};
+    host.x = {0.0, 1.0e-100};
+    host.y = {1.0, 1.0};
+    host.z = {1.0, 1.0};
+    host.vx = {0.0, 0.0};
+    host.vy = {0.0, 0.0};
+    host.vz = {0.0, 0.0};
+    tilemd::PairSpec spec;
+    spec.cutoff = 2.5;
+    host.pairs = {spec};
+
+    bool aborted = false;
+    try {
+      tilemd::Engine engine(std::move(host));
+      engine.Run(1);
+    } catch (const std::runtime_error& ex) {
+      aborted = true;
+      const std::string text = ex.what();
+      EXPECT_NE(text.find("step 0"), std::string::npos) << text;
+      EXPECT_TRUE(text.find("atom 0") != std::string::npos ||
+                  text.find("atom 1") != std::string::npos)
+          << text;
+      std::cout << "fused non-finite rebuild " << std::boolalpha << rebuild_every_step << ": "
+                << text << "\n";
+    }
+    EXPECT_TRUE(aborted) << "rebuild_every_step " << rebuild_every_step;
+    ASSERT_TRUE(std::filesystem::exists(emergency)) << "rebuild_every_step " << rebuild_every_step;
+    std::ifstream in(emergency);
+    std::string count;
+    std::string comment;
+    std::string atom0;
+    std::string atom1;
+    std::getline(in, count);
+    std::getline(in, comment);
+    std::getline(in, atom0);
+    std::getline(in, atom1);
+    in.close();
+    EXPECT_EQ(count, "2");
+    EXPECT_NE(comment.find("step=0"), std::string::npos) << comment;
+    EXPECT_NE(comment.find("shift=none"), std::string::npos) << comment;
+    EXPECT_EQ(atom0.empty(), false);
+    EXPECT_EQ(atom1.empty(), false);
+  }
+}
+
 // graph_unroll 30 does not divide a 1000-step segment: 33 graphs of 30 and one
 // tail graph of 10. The atom-neighbor engine must advance all 1000 steps.
 TEST(GpuLj, TailGraphMatchesTheCpu) {

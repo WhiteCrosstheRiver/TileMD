@@ -825,7 +825,7 @@ struct Engine::Impl {
   bool CaptureFusedConditional(cudaStream_t stream, int count, float4* cur, float4* nxt,
                                cudaGraph_t* graph, cudaGraphExec_t* exec);
   void LaunchTileStep(float4* pos_cur, float4* pos_out);
-  void RunTileSteps(int count, float4*& latest, float4*& other);
+  void RunTileSteps(int count, float4*& latest, float4*& other, int step0);
   bool CaptureFusedGraph(cudaStream_t stream, int count, float4* cur, float4* nxt,
                          cudaGraph_t* graph, cudaGraphExec_t* exec);
   void RecordClosingTileThermo();
@@ -1932,11 +1932,14 @@ void Engine::Impl::RecordClosingTileThermo() {
   drained.push_back(sample);
 }
 
-void Engine::Impl::RunTileSteps(int count, float4*& latest, float4*& other) {
+void Engine::Impl::RunTileSteps(int count, float4*& latest, float4*& other, int step0) {
   for (int step = 0; step < count; ++step) {
     if (TileListStale()) RebuildTileCache(latest);
     LaunchTileStep(latest, other);
     std::swap(latest, other);
+    DeviceStatus finished{};
+    TILEMD_CHECK(cudaMemcpy(&finished, status, sizeof(finished), cudaMemcpyDeviceToHost));
+    if (finished.nan_detected) AbortIfNonFinite(step0 + step, finished);
   }
 }
 
@@ -2101,7 +2104,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
     int done = 0;
     while (done < steps) {
       const int chunk = SegmentUntilDump(done, steps - done, dump_every, std::max(steps, 1));
-      RunTileSteps(chunk, latest, other);
+      RunTileSteps(chunk, latest, other, done);
       done += chunk;
       if (dump_every > 0 && done % dump_every == 0) WriteDump(done, true);
     }
@@ -2146,7 +2149,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
       const bool captured =
           CaptureFusedGraph(graph.stream, unroll, latest, other, &graph.graph, &graph.exec);
       if (!captured || tile_ncluster <= 0) {
-        RunTileSteps(unroll, latest, other);
+        RunTileSteps(unroll, latest, other, done);
       } else {
         DeviceStatus primed{};
         TILEMD_CHECK(cudaMemcpy(&primed, status, sizeof(primed), cudaMemcpyDeviceToHost));
@@ -2174,7 +2177,7 @@ void Engine::Impl::RunClusterTiles(int steps) {
           tile_step = saved_step;
           latest = pos;
           other = pos_next;
-          RunTileSteps(unroll, latest, other);
+          RunTileSteps(unroll, latest, other, done);
         }
       }
       done += unroll;
