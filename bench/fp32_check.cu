@@ -1,12 +1,14 @@
 // One-shot T1-v2 check for the FP32 atom-list force. Not part of ctest.
 // Usage: tilemd_fp32_check [threads_per_atom]
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "force/fp32_walk.hpp"
 #include "lj_reference.hpp"
 #include "md/fused_atom.hpp"
 
@@ -97,10 +99,41 @@ int main(int argc, char** argv) {
     fp32.potential_energy = got.potential_energy;
     for (int c = 0; c < 6; ++c) fp32.virial[c] = got.virial[c];
     const tilemd::ref::T1v2 gate = tilemd::ref::CompareT1v2(fp32, ref);
+    std::vector<double> host_x = x, host_y = y, host_z = z;
+    std::vector<double> host_vx(n, 0.0), host_vy(n, 0.0), host_vz(n, 0.0);
+    std::vector<int> host_ix(n, 0), host_iy(n, 0), host_iz(n, 0);
+    std::vector<double> vx = host_vx, vy = host_vy, vz = host_vz;
+    std::vector<int> image_x = host_ix, image_y = host_iy, image_z = host_iz;
+    const std::vector<double> x_ref = x, y_ref = y, z_ref = z;
+    const int nve_steps = 5;
+    const double dt = 0.005;
+    for (int step = 0; step < nve_steps; ++step) {
+      const tilemd::Fp32Walk force = tilemd::HostFp32Force(
+          box, host_x.data(), host_y.data(), host_z.data(), nn.data(), nl.data(), n, pair);
+      for (int i = 0; i < n; ++i) {
+        tilemd::KickDriftAxis(&host_x[i], &host_vx[i], force.fx[i], dt, 1.0, length, &host_ix[i]);
+        tilemd::KickDriftAxis(&host_y[i], &host_vy[i], force.fy[i], dt, 1.0, length, &host_iy[i]);
+        tilemd::KickDriftAxis(&host_z[i], &host_vz[i], force.fz[i], dt, 1.0, length, &host_iz[i]);
+      }
+    }
+    tilemd::Fp32NveStats stats;
+    tilemd::FusedAtomNve(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                         image_x.data(), image_y.data(), image_z.data(), x_ref.data(), y_ref.data(),
+                         z_ref.data(), nn.data(), nl.data(), n, max_neigh, pair, dt, 1.0, nve_steps,
+                         1, &stats);
+    double max_dx = 0.0;
+    for (int i = 0; i < n; ++i) {
+      max_dx = std::max(max_dx, std::abs(x[i] - host_x[i]));
+      max_dx = std::max(max_dx, std::abs(y[i] - host_y[i]));
+      max_dx = std::max(max_dx, std::abs(z[i] - host_z[i]));
+    }
+    const bool nve_ok = max_dx <= 1.0e-4;
     std::cout << "n=" << n << " tpa=" << threads << " force_rms_rel=" << gate.force_rms_rel
               << " force_max_rel=" << gate.force_max_rel << " energy_rel=" << gate.energy_rel
-              << " virial_rel=" << gate.virial_rel << " pass=" << (gate.pass ? 1 : 0) << "\n";
-    return gate.pass ? 0 : 1;
+              << " virial_rel=" << gate.virial_rel << " pass=" << (gate.pass ? 1 : 0)
+              << " nve_steps=" << nve_steps << " max_dx=" << max_dx
+              << " max_disp2=" << stats.max_disp2 << " nve_ok=" << (nve_ok ? 1 : 0) << "\n";
+    return (gate.pass && nve_ok) ? 0 : 1;
   } catch (const std::exception& err) {
     std::cerr << err.what() << "\n";
     return 2;

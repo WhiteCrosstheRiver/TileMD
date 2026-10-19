@@ -31,4 +31,16 @@ Fp32Force FusedAtomForce(const double* box, const double* x, const double* y, co
                          const int* nn, const int* nl, int n, int max_neigh, const Fp32Lj& pair,
                          int threads_per_atom);
 
+struct Fp32NveStats {
+  double max_disp2 = 0.0;
+};
+
+// One launch per step. FP32 pair force, then symplectic Euler on the double
+// master coordinates. The neighbor list is not rebuilt.
+void FusedAtomNve(const double* box, double* x, double* y, double* z, double* vx, double* vy,
+                  double* vz, int* image_x, int* image_y, int* image_z, const double* x_ref,
+                  const double* y_ref, const double* z_ref, const int* nn, const int* nl, int n,
+                  int max_neigh, const Fp32Lj& pair, double dt, double mass, int steps,
+                  int threads_per_atom, Fp32NveStats* stats);
+
 }  // namespace tilemd
