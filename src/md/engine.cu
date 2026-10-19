@@ -565,6 +565,68 @@ __global__ void KickDrift(double* x, double* y, double* z, double* vx, double* v
   z[i] = WrapDouble(z[i] + dt * vz[i], c_box[2], &imgz[i]);
 }
 
+__global__ void DriftHalf(double* x, double* y, double* z, const double* vx, const double* vy,
+                          const double* vz, int* imgx, int* imgy, int* imgz, int n,
+                          double half_dt) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  x[i] = WrapDouble(x[i] + half_dt * vx[i], c_box[0], &imgx[i]);
+  y[i] = WrapDouble(y[i] + half_dt * vy[i], c_box[1], &imgy[i]);
+  z[i] = WrapDouble(z[i] + half_dt * vz[i], c_box[2], &imgz[i]);
+}
+
+__device__ void PhiloxRound(unsigned* ctr, unsigned& key0, unsigned& key1) {
+  const unsigned long long p0 = static_cast<unsigned long long>(0xD2511F53u) * ctr[0];
+  const unsigned long long p1 = static_cast<unsigned long long>(0xCD9E8D57u) * ctr[2];
+  const unsigned lo0 = static_cast<unsigned>(p0);
+  const unsigned lo1 = static_cast<unsigned>(p1);
+  const unsigned hi0 = static_cast<unsigned>(p0 >> 32);
+  const unsigned hi1 = static_cast<unsigned>(p1 >> 32);
+  const unsigned next0 = hi1 ^ ctr[1] ^ key0;
+  const unsigned next1 = lo1;
+  const unsigned next2 = hi0 ^ ctr[3] ^ key1;
+  const unsigned next3 = lo0;
+  ctr[0] = next0;
+  ctr[1] = next1;
+  ctr[2] = next2;
+  ctr[3] = next3;
+  key0 += 0x9E3779B9u;
+  key1 += 0xBB67AE85u;
+}
+
+__device__ void DeviceNormals(unsigned seed, unsigned step_lo, unsigned step_hi, int gid,
+                              double out[3]) {
+  unsigned ctr[4] = {static_cast<unsigned>(gid), step_lo, step_hi, 0u};
+  unsigned key0 = seed;
+  unsigned key1 = 0u;
+  for (int round = 0; round < 10; ++round) PhiloxRound(ctr, key0, key1);
+  const unsigned bits[4] = {ctr[0], ctr[1], ctr[2], ctr[3]};
+  double normal[4];
+  for (int pair = 0; pair < 2; ++pair) {
+    const double u1 = (static_cast<double>(bits[2 * pair]) + 0.5) * (1.0 / 4294967296.0);
+    const double u2 = (static_cast<double>(bits[2 * pair + 1]) + 0.5) * (1.0 / 4294967296.0);
+    const double radius = sqrt(-2.0 * log(u1));
+    const double angle = 6.28318530717958647692 * u2;
+    normal[2 * pair] = radius * cos(angle);
+    normal[2 * pair + 1] = radius * sin(angle);
+  }
+  out[0] = normal[0];
+  out[1] = normal[1];
+  out[2] = normal[2];
+}
+
+__global__ void OrnsteinUhlenbeck(double* vx, double* vy, double* vz, const int* gid, int n,
+                                  double decay, double noise, unsigned seed, unsigned step_lo,
+                                  unsigned step_hi) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  double draw[3] = {0.0, 0.0, 0.0};
+  if (noise > 0.0) DeviceNormals(seed, step_lo, step_hi, gid[i], draw);
+  vx[i] = decay * vx[i] + noise * draw[0];
+  vy[i] = decay * vy[i] + noise * draw[1];
+  vz[i] = decay * vz[i] + noise * draw[2];
+}
+
 __global__ void Kick(double* vx, double* vy, double* vz, const float* fx, const float* fy,
                      const float* fz, int n, double dt, double inv_mass) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -806,6 +868,7 @@ struct Engine::Impl {
   void LaunchStep(cudaStream_t stream);
   void LaunchPrefix(cudaStream_t stream);
   void LaunchSuffix(cudaStream_t stream);
+  void RunBaoab(int steps);
   bool CaptureConditional(cudaStream_t stream, int count, cudaGraph_t* graph,
                           cudaGraphExec_t* exec);
   void Snapshot(cudaStream_t stream);
@@ -2375,8 +2438,77 @@ double Engine::TimeForceKernel(int block_size, int repeats) {
   return static_cast<double>(milliseconds) * 1.0e-3;
 }
 
+void Engine::Impl::RunBaoab(int steps) {
+  if (!(system.gamma >= 0.0)) throw std::runtime_error("friction must be non-negative");
+  if (!(system.temperature >= 0.0)) throw std::runtime_error("temperature must be non-negative");
+  Upload();
+  if (!forces_ready) {
+    int overflow = BuildNeighbors(true);
+    if (overflow) throw std::runtime_error("initial neighbor list overflowed");
+    ComputeForce();
+  }
+  RecordInitialThermo();
+  const int dump_every = system.dump_path.empty() ? 0 : system.dump_every;
+  if (dump_every > 0) WriteDump(0, false);
+  if (steps == 0) {
+    forces_ready = true;
+    return;
+  }
+  const double half_dt = 0.5 * system.dt;
+  const double inv_mass = 1.0 / system.mass;
+  const double decay = std::exp(-system.gamma * system.dt);
+  const double noise = std::sqrt(system.temperature * (1.0 - decay * decay) * inv_mass);
+  for (int done = 0; done < steps; ++done) {
+    Kick<<<Grid(n), kBlock>>>(vx, vy, vz, fx, fy, fz, n, system.dt, inv_mass);
+    DriftHalf<<<Grid(n), kBlock>>>(x, y, z, vx, vy, vz, imgx, imgy, imgz, n, half_dt);
+    const auto step = static_cast<std::uint64_t>(done);
+    OrnsteinUhlenbeck<<<Grid(n), kBlock>>>(vx, vy, vz, gid, n, decay, noise, system.langevin_seed,
+                                           static_cast<unsigned>(step),
+                                           static_cast<unsigned>(step >> 32));
+    DriftHalf<<<Grid(n), kBlock>>>(x, y, z, vx, vy, vz, imgx, imgy, imgz, n, half_dt);
+    RefreshShadow<<<Grid(n), kBlock>>>(x, y, z, type, pos, n);
+    ResetDisplacement<<<1, 1>>>(status);
+    DispKernel<<<Grid(n), kBlock>>>(pos, xref, n, status);
+    DecideRebuild<<<1, 1>>>(status);
+    QueueRebuild(nullptr);
+    SetEvFlag<<<1, 1>>>(ev_flag, step_counter);
+    LaunchForce(kBlock, nullptr, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy, wxz,
+                wyz, n, status, ev_flag);
+    CheckLaunch();
+    DeviceStatus finished{};
+    TILEMD_CHECK(cudaMemcpy(&finished, status, sizeof(finished), cudaMemcpyDeviceToHost));
+    if (finished.nan_detected) AbortIfNonFinite(done, finished);
+    if (finished.overflow) {
+      throw std::runtime_error("neighbor list overflowed during integration at step " +
+                               std::to_string(done));
+    }
+    Kick<<<Grid(n), kBlock>>>(vx, vy, vz, fx, fy, fz, n, system.dt, inv_mass);
+    PartialThermo<<<Grid(n), kBlock>>>(vx, vy, vz, energy, wxx, wyy, wzz, wxy, wxz, wyz, n,
+                                       thermo_partial, ev_flag);
+    FinishThermo<<<1, 1>>>(thermo_partial, npartial, thermo_ring, kThermoRing, thermo_count,
+                           step_counter, ev_flag, 1, status);
+    IncrementStep<<<1, 1>>>(step_counter);
+    CheckLaunch();
+    if (dump_every > 0 && (done + 1) % dump_every == 0) WriteDump(done + 1, true);
+  }
+  forces_ready = true;
+}
+
 void Engine::Run(int steps) {
   if (steps < 0) throw std::runtime_error("step count must be non-negative");
+  if (impl_->system.langevin) {
+    if (!(impl_->system.gamma >= 0.0)) throw std::runtime_error("friction must be non-negative");
+    if (!(impl_->system.temperature >= 0.0)) {
+      throw std::runtime_error("temperature must be non-negative");
+    }
+    if (impl_->system.gamma > 0.0) {
+      if (impl_->system.use_cluster_tiles) {
+        throw std::runtime_error("fused leapfrog does not apply Langevin");
+      }
+      impl_->RunBaoab(steps);
+      return;
+    }
+  }
   if (impl_->system.use_cluster_tiles) {
     impl_->RunClusterTiles(steps);
     return;

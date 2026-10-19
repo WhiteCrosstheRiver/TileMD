@@ -1469,3 +1469,81 @@ TEST(GpuLj, GraphUnrollSweep) {
     }
   }
 }
+
+// Atom-neighbor BAOAB. Zero friction stays on the captured Verlet graph. The
+// fused leapfrog rejects a positive friction.
+TEST(GpuLj, AtomBaoabMatchesTheCpu) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  tilemd::ref::System origin;
+  origin.box[0] = origin.box[1] = origin.box[2] = 30.0;
+  origin.shift = tilemd::ref::Shift::None;
+  origin.pairs.push_back({0, 0, 1.0, 1.0, 2.5});
+  origin.type = {0, 0};
+  origin.x = {5.0, 20.0};
+  origin.y = {5.0, 20.0};
+  origin.z = {5.0, 20.0};
+  const std::vector<double> vx = {0.2, 0.2};
+  const std::vector<double> vy = {0.0, 0.0};
+  const std::vector<double> vz = {-0.1, -0.1};
+  tilemd::ref::Langevin thermo;
+  thermo.gamma = 1.0;
+  thermo.temperature = 1.2;
+  thermo.seed = 11;
+  constexpr double dt = 0.005;
+  constexpr int kSteps = 20;
+  tilemd::ref::System cpu_system = origin;
+  tilemd::ref::Dynamics cpu = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  for (int step = 0; step < kSteps; ++step) {
+    tilemd::ref::LangevinBaoabStep(cpu_system, cpu, dt, 1.0, thermo,
+                                   static_cast<std::uint64_t>(step));
+  }
+
+  tilemd::HostSystem host = FromReference(origin, 0.3, 0, true);
+  host.dt = dt;
+  host.mass = 1.0;
+  host.vx = vx;
+  host.vy = vy;
+  host.vz = vz;
+  host.langevin = true;
+  host.gamma = thermo.gamma;
+  host.temperature = thermo.temperature;
+  host.langevin_seed = thermo.seed;
+  tilemd::Engine engine(host);
+  engine.Run(kSteps);
+  std::vector<double> x, y, z, gvx, gvy, gvz;
+  engine.DownloadPositions(x, y, z);
+  engine.DownloadVelocities(gvx, gvy, gvz);
+  const double max_x =
+      std::max(MaxAbsDelta(x, cpu.x), std::max(MaxAbsDelta(y, cpu.y), MaxAbsDelta(z, cpu.z)));
+  const double max_v = std::max(MaxAbsDelta(gvx, cpu.vx),
+                                std::max(MaxAbsDelta(gvy, cpu.vy), MaxAbsDelta(gvz, cpu.vz)));
+  std::cout << std::scientific << std::setprecision(8) << "baoab max |dx| " << max_x << " max |dv| "
+            << max_v << "\n";
+  EXPECT_LT(max_x, 1.0e-15);
+  EXPECT_LT(max_v, 1.0e-15);
+
+  tilemd::HostSystem cold = FromReference(LatticeBox(), 0.3, 0, true);
+  cold.vx.assign(cold.x.size(), 0.02);
+  cold.vy.assign(cold.x.size(), -0.01);
+  cold.langevin = true;
+  cold.gamma = 0.0;
+  cold.temperature = 1.5;
+  cold.langevin_seed = 7;
+  tilemd::HostSystem plain = cold;
+  plain.langevin = false;
+  tilemd::Engine with_flag(cold);
+  tilemd::Engine without(plain);
+  with_flag.Run(20);
+  without.Run(20);
+  std::vector<double> ax, ay, az, bx, by, bz;
+  with_flag.DownloadPositions(ax, ay, az);
+  without.DownloadPositions(bx, by, bz);
+  EXPECT_EQ(0, std::memcmp(ax.data(), bx.data(), ax.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(ay.data(), by.data(), ay.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(az.data(), bz.data(), az.size() * sizeof(double)));
+
+  tilemd::HostSystem fused = host;
+  fused.use_cluster_tiles = true;
+  fused.gamma = 1.0;
+  EXPECT_THROW(tilemd::Engine(fused).Run(1), std::runtime_error);
+}

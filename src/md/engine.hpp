@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,12 @@ struct HostSystem {
   // Cluster tiles replace the atom neighbor list for forces and integration.
   // The default remains the atom-neighbor engine.
   bool use_cluster_tiles = false;
+  // BAOAB on the atom-neighbor path. Zero friction stays on velocity Verlet.
+  // The fused leapfrog does not apply this.
+  bool langevin = false;
+  double gamma = 0.0;
+  double temperature = 1.0;
+  std::uint32_t langevin_seed = 1;
   std::vector<int> type;
   std::vector<double> x;
   std::vector<double> y;

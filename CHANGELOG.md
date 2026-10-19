@@ -25,7 +25,7 @@
 - M5 cluster-pair rows are appended in cluster order. The earlier row starts overlapped, and the corrected tile forces match the double-precision oracle on the fixtures. Efficiency is 0.102 at 4k and 0.0916 at 32k.
 - M5 column-width sweep. Targets of 64, 128, and 256 atoms per column keep the same inside-pair count and the same forces. None of them reaches the 40–60% efficiency expectation.
 - M6 CPU leapfrog integrator. Over 100 steps it matches velocity Verlet to round-off on the double-precision oracle.
-- M6 CPU BAOAB Langevin thermostat. The random draw is Philox4x32-10 keyed by seed, step, and atom id. Zero friction matches velocity Verlet. The device step does not apply it yet.
+- M6 CPU BAOAB Langevin thermostat. The random draw is Philox4x32-10 keyed by seed, step, and atom id. Zero friction matches velocity Verlet. The atom-neighbor device path runs the same splitting: 20 steps on two non-interacting atoms stay within 1.11e-16 of the CPU. Zero friction stays on the Verlet graph. The fused leapfrog does not apply it.
 - M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded.
 - M6 fused leapfrog launch. On a 125-atom lattice, 100 steps stay within 2.8e-9 of the CPU leapfrog, both when the list is rebuilt every step and when two graphs of 50 steps are launched.
 - M6 fused device thermo. On that lattice, steps 0, 2, 4, 6, and 8 match the CPU leapfrog to 7.1e-7 in virial, including one captured graph.
