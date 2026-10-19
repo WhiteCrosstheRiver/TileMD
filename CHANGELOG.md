@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Host cell neighbor list for the FP32 path. On a displaced 864-atom fcc it matches the all-pairs list, including a pair that meets through a periodic face. `tilemd_fp32_bench` times the fused step from that list and has not been launched.
 - FP32 fused kick-drift step. The steps are queued and the host syncs once at the end. `tilemd_fp32_check` compares five steps at one thread per atom with the host walk. That binary is compiled and has not been launched.
 - Host FP32 neighbor walk. On a displaced 864-atom fcc it passes T1-v2 against the double oracle. A perfect lattice does not: its net force is roundoff, so the force ratio is noise. Ten kick-drift steps stay inside the box.
 - FP32 LJ pair function and cell-local minimum image. On boxes of length 32 and 33.5 the shadow delta matches the double minimum image. The fused atom-list force kernel builds as `tilemd_fp32_check` and is not the engine default yet.

@@ -2,11 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
 #include "lj_reference.hpp"
 #include "md/fused_atom.hpp"
+#include "neighbor/cell_list.hpp"
 
 namespace {
 
@@ -167,4 +169,47 @@ TEST(Fp32Walk, ShortNveStaysInTheBox) {
       EXPECT_TRUE(std::isfinite(force.fx[i]));
     }
   }
+}
+
+std::vector<int> Row(const tilemd::CellList& list, int i, int n) {
+  std::vector<int> row;
+  for (int k = 0; k < list.nn[i]; ++k) row.push_back(list.nl[static_cast<std::size_t>(k) * n + i]);
+  return row;
+}
+
+TEST(Fp32Walk, CellListMatchesAllPairs) {
+  std::vector<double> x, y, z;
+  double length = 0;
+  MakeFcc(6, &x, &y, &z, &length);
+  const int n = static_cast<int>(x.size());
+  for (int i = 0; i < n; ++i) {
+    x[i] += 0.07 * std::sin(0.7 * i);
+    y[i] += 0.05 * std::cos(0.3 * i);
+    z[i] += 0.04 * std::sin(0.5 * i + 1.0);
+    x[i] -= length * std::floor(x[i] / length);
+    y[i] -= length * std::floor(y[i] / length);
+    z[i] -= length * std::floor(z[i] / length);
+  }
+  const double box[3] = {length, length, length};
+  const double reach = 2.8;
+  const tilemd::CellList cells = tilemd::BuildCellList(box, x.data(), y.data(), z.data(), n, reach);
+  std::vector<int> nn, nl;
+  FillNeighbors(x, y, z, length, reach, 256, &nn, &nl);
+  for (int i = 0; i < n; ++i) {
+    std::vector<int> brute;
+    for (int k = 0; k < nn[i]; ++k) brute.push_back(nl[static_cast<std::size_t>(k) * n + i]);
+    std::sort(brute.begin(), brute.end());
+    EXPECT_EQ(Row(cells, i, n), brute) << i;
+  }
+}
+
+TEST(Fp32Walk, CellListSeesThePeriodicFace) {
+  const double box[3] = {10, 10, 10};
+  const double x[2] = {0.001, 9.999};
+  const double y[2] = {1, 1};
+  const double z[2] = {2, 2};
+  const tilemd::CellList cells = tilemd::BuildCellList(box, x, y, z, 2, 0.5);
+  ASSERT_EQ(cells.nn[0], 1);
+  EXPECT_EQ(cells.nl[0], 1);
+  EXPECT_EQ(cells.nl[1], 0);
 }
