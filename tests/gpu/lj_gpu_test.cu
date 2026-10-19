@@ -1547,3 +1547,64 @@ TEST(GpuLj, AtomBaoabMatchesTheCpu) {
   fused.gamma = 1.0;
   EXPECT_THROW(tilemd::Engine(fused).Run(1), std::runtime_error);
 }
+
+// Three atoms start outside the neighbor shell with room for one neighbor.
+// One BAOAB step pulls two of them inside. The list must grow before the
+// second kick; a truncated list would miss one pair.
+TEST(GpuLj, AtomBaoabGrowsTheNeighborList) {
+  if (!HasGpu()) GTEST_SKIP() << "No CUDA device";
+  tilemd::ref::System origin;
+  origin.box[0] = 12.0;
+  origin.box[1] = 12.0;
+  origin.box[2] = 12.0;
+  origin.shift = tilemd::ref::Shift::Force;
+  origin.pairs.push_back({0, 0, 1.0, 1.0, 2.5});
+  origin.type = {0, 0, 0};
+  origin.x = {6.0, 8.95, 6.0};
+  origin.y = {6.0, 6.0, 8.95};
+  origin.z = {6.0, 6.0, 6.0};
+  tilemd::ref::Langevin thermo;
+  thermo.gamma = 1.0;
+  thermo.temperature = 0.0;
+  thermo.seed = 3;
+  constexpr double dt = 0.005;
+
+  tilemd::HostSystem still_host = FromReference(origin, 0.3, 1, true);
+  still_host.dt = dt;
+  still_host.mass = 1.0;
+  still_host.langevin = true;
+  still_host.gamma = thermo.gamma;
+  still_host.temperature = thermo.temperature;
+  still_host.langevin_seed = thermo.seed;
+  tilemd::Engine still(still_host);
+  ASSERT_EQ(still.MaxNeigh(), 1);
+  still.Run(1);
+  EXPECT_EQ(still.MaxNeigh(), 1);
+
+  const std::vector<double> vx = {0.0, -100.0, 0.0};
+  const std::vector<double> vy = {0.0, 0.0, -100.0};
+  const std::vector<double> vz = {0.0, 0.0, 0.0};
+  tilemd::ref::System cpu_system = origin;
+  tilemd::ref::Dynamics cpu = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::LangevinBaoabStep(cpu_system, cpu, dt, 1.0, thermo, 0);
+
+  tilemd::HostSystem host = still_host;
+  host.vx = vx;
+  host.vy = vy;
+  host.vz = vz;
+  tilemd::Engine engine(host);
+  ASSERT_EQ(engine.MaxNeigh(), 1);
+  engine.Run(1);
+  EXPECT_GT(engine.MaxNeigh(), 1);
+  std::vector<double> x, y, z, gvx, gvy, gvz;
+  engine.DownloadPositions(x, y, z);
+  engine.DownloadVelocities(gvx, gvy, gvz);
+  const double max_x =
+      std::max(MaxAbsDelta(x, cpu.x), std::max(MaxAbsDelta(y, cpu.y), MaxAbsDelta(z, cpu.z)));
+  const double max_v = std::max(MaxAbsDelta(gvx, cpu.vx),
+                                std::max(MaxAbsDelta(gvy, cpu.vy), MaxAbsDelta(gvz, cpu.vz)));
+  std::cout << std::scientific << std::setprecision(8) << "baoab grow max |dx| " << max_x
+            << " max |dv| " << max_v << " max_neigh " << engine.MaxNeigh() << "\n";
+  EXPECT_LT(max_x, 1.0e-15);
+  EXPECT_LT(max_v, 1.0e-13);
+}

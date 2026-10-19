@@ -2478,9 +2478,11 @@ void Engine::Impl::RunBaoab(int steps) {
     DeviceStatus finished{};
     TILEMD_CHECK(cudaMemcpy(&finished, status, sizeof(finished), cudaMemcpyDeviceToHost));
     if (finished.nan_detected) AbortIfNonFinite(done, finished);
+    // The half drifts and the thermostat have already run. Grow the list at
+    // these positions and replace the truncated force before the second kick.
     if (finished.overflow) {
-      throw std::runtime_error("neighbor list overflowed during integration at step " +
-                               std::to_string(done));
+      BuildNeighbors(true);
+      ComputeForce();
     }
     Kick<<<Grid(n), kBlock>>>(vx, vy, vz, fx, fy, fz, n, system.dt, inv_mass);
     PartialThermo<<<Grid(n), kBlock>>>(vx, vy, vz, energy, wxx, wyy, wzz, wxy, wxz, wyz, n,
