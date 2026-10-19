@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <vector>
 
+#include "io/lammps_dump.hpp"
 #include "lj_reference.hpp"
 #include "md/fused_atom.hpp"
 #include "neighbor/cell_list.hpp"
@@ -201,6 +203,16 @@ TEST(Fp32Walk, CellListMatchesAllPairs) {
     std::sort(brute.begin(), brute.end());
     EXPECT_EQ(Row(cells, i, n), brute) << i;
   }
+}
+
+TEST(Fp32Walk, MeltDumpHasTheBaselineAtoms) {
+  const std::string path =
+      std::string(TILEMD_SOURCE_DIR) + "/tests/validation/lammps_ref/init_32k.dump";
+  const tilemd::DumpFrame frame = tilemd::ReadLammpsDump(path);
+  EXPECT_EQ(frame.x.size(), 32000u);
+  EXPECT_NEAR(frame.box[0], 33.591923827650149, 1e-12);
+  EXPECT_NEAR(frame.x[0], 0.0, 0.0);
+  EXPECT_NEAR(frame.vx[0], 0.55710519079511855, 1e-15);
 }
 
 TEST(Fp32Walk, CellListSeesThePeriodicFace) {
