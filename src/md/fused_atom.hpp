@@ -37,8 +37,9 @@ struct Fp32NveStats {
 };
 
 // Device state for the FP32 kick-drift. The constructor uploads once.
-// `Steps` only launches kernels. `SkinSteps` syncs every step and, once an
-// atom has moved past half the skin, rebuilds the list on the host.
+// `Steps` only launches kernels. `SkinSteps` launches a short batch. The step
+// that crosses half the skin still runs; later kernels in that batch return
+// without moving atoms, and the host then rebuilds the list.
 class Fp32Session {
  public:
   Fp32Session(const double* box, const double* x, const double* y, const double* z,

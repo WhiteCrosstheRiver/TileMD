@@ -154,7 +154,13 @@ __global__ void __launch_bounds__(128)
                         int* image_y, int* image_z, const double* xref, const double* yref,
                         const double* zref, const int* __restrict__ nn, const int* __restrict__ nl,
                         int n, Fp32Lj pair, BoxCells cells, double dt, double mass, double lx,
-                        double ly, double lz, int* max_disp_bits) {
+                        double ly, double lz, int* max_disp_bits, int* halt_in, int* halt_out,
+                        float trigger2, int* ran) {
+  if (*halt_in) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) atomicExch(halt_out, 1);
+    return;
+  }
+  if (blockIdx.x == 0 && threadIdx.x == 0) atomicAdd(ran, 1);
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int slot = tid / kThreadsPerAtom;
   const int sub = tid - slot * kThreadsPerAtom;
@@ -227,7 +233,10 @@ __global__ void __launch_bounds__(128)
     }
     __syncthreads();
   }
-  if (threadIdx.x == 0) atomicMax(max_disp_bits, __float_as_int(scratch[0]));
+  if (threadIdx.x == 0) {
+    atomicMax(max_disp_bits, __float_as_int(scratch[0]));
+    if (trigger2 >= 0.f && scratch[0] > trigger2) atomicExch(halt_out, 1);
+  }
 }
 
 template <int kThreadsPerAtom>
@@ -235,16 +244,17 @@ void LaunchStep(const float4* cur, float4* next, double* x, double* y, double* z
                 double* vy, double* vz, int* image_x, int* image_y, int* image_z,
                 const double* xref, const double* yref, const double* zref, const int* nn,
                 const int* nl, int n, Fp32Lj pair, BoxCells cells, double dt, double mass,
-                double lx, double ly, double lz, int* max_disp_bits) {
+                double lx, double ly, double lz, int* max_disp_bits, int* halt_in, int* halt_out,
+                float trigger2, int* ran) {
   const int threads = n * kThreadsPerAtom;
   const int grid = (threads + 127) / 128;
-  FusedAtomStepKernel<kThreadsPerAtom>
-      <<<grid, 128>>>(cur, next, x, y, z, vx, vy, vz, image_x, image_y, image_z, xref, yref, zref,
-                      nn, nl, n, pair, cells, dt, mass, lx, ly, lz, max_disp_bits);
+  FusedAtomStepKernel<kThreadsPerAtom><<<grid, 128>>>(
+      cur, next, x, y, z, vx, vy, vz, image_x, image_y, image_z, xref, yref, zref, nn, nl, n, pair,
+      cells, dt, mass, lx, ly, lz, max_disp_bits, halt_in, halt_out, trigger2, ran);
 }
 
 struct Hold {
-  void* pointer[20] = {};
+  void* pointer[24] = {};
   int count = 0;
   void Add(void* item) { pointer[count++] = item; }
   void Drop(void* item) {
@@ -360,6 +370,10 @@ struct Fp32Session::Impl {
   int* nn = nullptr;
   int* nl = nullptr;
   int* bits = nullptr;
+  int* halt[2] = {};
+  int halt_phase = 0;
+  int* ran = nullptr;
+  float trigger2 = -1.f;
   float4* buffers[2] = {};
   int current = 0;
   int n = 0;
@@ -380,25 +394,33 @@ void Fp32Session::LaunchOne() {
                   impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
                   impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
                   impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
-                  impl->bits);
+                  impl->bits, impl->halt[impl->halt_phase & 1],
+                  impl->halt[(impl->halt_phase + 1) & 1], impl->trigger2, impl->ran);
+    ++impl->halt_phase;
   } else if (impl->threads_per_atom == 2) {
     LaunchStep<2>(impl->buffers[impl->current], impl->buffers[next], impl->x, impl->y, impl->z,
                   impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
                   impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
                   impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
-                  impl->bits);
+                  impl->bits, impl->halt[impl->halt_phase & 1],
+                  impl->halt[(impl->halt_phase + 1) & 1], impl->trigger2, impl->ran);
+    ++impl->halt_phase;
   } else if (impl->threads_per_atom == 4) {
     LaunchStep<4>(impl->buffers[impl->current], impl->buffers[next], impl->x, impl->y, impl->z,
                   impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
                   impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
                   impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
-                  impl->bits);
+                  impl->bits, impl->halt[impl->halt_phase & 1],
+                  impl->halt[(impl->halt_phase + 1) & 1], impl->trigger2, impl->ran);
+    ++impl->halt_phase;
   } else {
     LaunchStep<8>(impl->buffers[impl->current], impl->buffers[next], impl->x, impl->y, impl->z,
                   impl->vx, impl->vy, impl->vz, impl->image_x, impl->image_y, impl->image_z,
                   impl->xref, impl->yref, impl->zref, impl->nn, impl->nl, impl->n, impl->pair,
                   impl->cells, impl->dt, impl->mass, impl->box[0], impl->box[1], impl->box[2],
-                  impl->bits);
+                  impl->bits, impl->halt[impl->halt_phase & 1],
+                  impl->halt[(impl->halt_phase + 1) & 1], impl->trigger2, impl->ran);
+    ++impl->halt_phase;
   }
   Check(cudaGetLastError(), "fused atom step launch");
   impl->current = next;
@@ -439,6 +461,9 @@ Fp32Session::Fp32Session(const double* box, const double* x, const double* y, co
     alloc(reinterpret_cast<void**>(&impl_->nn), atoms * sizeof(int), "cudaMalloc nn");
     alloc(reinterpret_cast<void**>(&impl_->nl), list * sizeof(int), "cudaMalloc nl");
     alloc(reinterpret_cast<void**>(&impl_->bits), sizeof(int), "cudaMalloc disp");
+    alloc(reinterpret_cast<void**>(&impl_->halt[0]), sizeof(int), "cudaMalloc halt 0");
+    alloc(reinterpret_cast<void**>(&impl_->halt[1]), sizeof(int), "cudaMalloc halt 1");
+    alloc(reinterpret_cast<void**>(&impl_->ran), sizeof(int), "cudaMalloc ran");
     alloc(reinterpret_cast<void**>(&impl_->buffers[0]), atoms * sizeof(float4), "cudaMalloc pos0");
     alloc(reinterpret_cast<void**>(&impl_->buffers[1]), atoms * sizeof(float4), "cudaMalloc pos1");
     Check(cudaMemcpy(impl_->x, x, atoms * sizeof(double), cudaMemcpyHostToDevice), "copy x");
@@ -486,6 +511,10 @@ Fp32Session::~Fp32Session() { delete impl_; }
 
 Fp32NveStats Fp32Session::Steps(int steps) {
   if (steps <= 0) throw std::runtime_error("fused atom step needs at least one step");
+  impl_->trigger2 = -1.f;
+  impl_->halt_phase = 0;
+  Check(cudaMemset(impl_->halt[0], 0, sizeof(int)), "clear halt");
+  Check(cudaMemset(impl_->halt[1], 0, sizeof(int)), "clear halt");
   Check(cudaMemset(impl_->bits, 0, sizeof(int)), "clear disp");
   int left = steps;
   while (left > 0) {
@@ -578,17 +607,44 @@ Fp32NveStats Fp32Session::SkinSteps(int steps, double skin) {
     Check(cudaGetLastError(), "refresh encode");
     Check(cudaDeviceSynchronize(), "refresh encode");
     impl_->current = 0;
+    impl_->halt_phase = 0;
+    Check(cudaMemset(impl_->halt[0], 0, sizeof(int)), "clear halt");
+    Check(cudaMemset(impl_->halt[1], 0, sizeof(int)), "clear halt");
   };
+  impl_->trigger2 = trigger2;
   refresh();
   Fp32NveStats total;
-  for (int step = 0; step < steps; ++step) {
-    const Fp32NveStats one = Steps(1);
-    total.max_disp2 = std::max(total.max_disp2, one.max_disp2);
-    if (DisplacementNeedsRebuild(static_cast<float>(one.max_disp2), trigger2)) {
+  int left = steps;
+  while (left > 0) {
+    impl_->halt_phase = 0;
+    Check(cudaMemset(impl_->halt[0], 0, sizeof(int)), "clear halt");
+    Check(cudaMemset(impl_->halt[1], 0, sizeof(int)), "clear halt");
+    Check(cudaMemset(impl_->bits, 0, sizeof(int)), "clear disp");
+    Check(cudaMemset(impl_->ran, 0, sizeof(int)), "clear ran");
+    const int chunk = left < 32 ? left : 32;
+    for (int step = 0; step < chunk; ++step) LaunchOne();
+    Check(cudaDeviceSynchronize(), "fused atom skin");
+    int host_ran = 0;
+    int host_halt0 = 0;
+    int host_halt1 = 0;
+    int host_bits = 0;
+    Check(cudaMemcpy(&host_ran, impl_->ran, sizeof(int), cudaMemcpyDeviceToHost), "copy ran");
+    Check(cudaMemcpy(&host_halt0, impl_->halt[0], sizeof(int), cudaMemcpyDeviceToHost),
+          "copy halt");
+    Check(cudaMemcpy(&host_halt1, impl_->halt[1], sizeof(int), cudaMemcpyDeviceToHost),
+          "copy halt");
+    Check(cudaMemcpy(&host_bits, impl_->bits, sizeof(int), cudaMemcpyDeviceToHost), "copy disp");
+    if (host_ran <= 0) throw std::runtime_error("skin step made no progress");
+    float disp_bits = 0.f;
+    std::memcpy(&disp_bits, &host_bits, sizeof(disp_bits));
+    total.max_disp2 = std::max(total.max_disp2, static_cast<double>(disp_bits));
+    left -= host_ran;
+    if (host_halt0 != 0 || host_halt1 != 0) {
       refresh();
       ++total.rebuilds;
     }
   }
+  impl_->trigger2 = -1.f;
   return total;
 }
 
