@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Conditional CUDA graph nodes compile on CUDA 12.4. The edge-data pointer is passed only on toolkit 13 and newer.
+
 ### Added
 - Host FP32 NVE on 256 atoms changes the total energy by 2.8e-4 relative over 1000 steps. The test fails above 5e-4.
 - After 40 FP32 steps that cross the skin, the host list still matches the double-precision oracle.

@@ -1472,6 +1472,34 @@ void Engine::Impl::RestoreSnapshot() {
   CheckLaunch();
 }
 
+// CUDA 13 inserts an edge-data pointer. CUDA 12.4, used by CI, does not.
+cudaError_t CaptureDeps(cudaStream_t stream, cudaStreamCaptureStatus* status, cudaGraph_t* graph,
+                        const cudaGraphNode_t** deps, size_t* count) {
+#if CUDART_VERSION >= 13000
+  return cudaStreamGetCaptureInfo(stream, status, nullptr, graph, deps, nullptr, count);
+#else
+  return cudaStreamGetCaptureInfo(stream, status, nullptr, graph, deps, count);
+#endif
+}
+
+cudaError_t AddConditional(cudaGraphNode_t* node, cudaGraph_t graph, const cudaGraphNode_t* deps,
+                           size_t count, cudaGraphNodeParams* params) {
+#if CUDART_VERSION >= 13000
+  return cudaGraphAddNode(node, graph, deps, nullptr, count, params);
+#else
+  return cudaGraphAddNode(node, graph, deps, count, params);
+#endif
+}
+
+cudaError_t ReplaceCaptureDeps(cudaStream_t stream, cudaGraphNode_t* node) {
+#if CUDART_VERSION >= 13000
+  return cudaStreamUpdateCaptureDependencies(stream, node, nullptr, 1,
+                                             cudaStreamSetCaptureDependencies);
+#else
+  return cudaStreamUpdateCaptureDependencies(stream, node, 1, cudaStreamSetCaptureDependencies);
+#endif
+}
+
 bool Engine::Impl::CaptureConditional(cudaStream_t stream, int count, cudaGraph_t* graph,
                                       cudaGraphExec_t* exec) {
   cudaGraph_t built = nullptr;
@@ -1504,8 +1532,7 @@ bool Engine::Impl::CaptureConditional(cudaStream_t stream, int count, cudaGraph_
     cudaGraph_t captured = nullptr;
     const cudaGraphNode_t* deps = nullptr;
     size_t ndeps = 0;
-    if (cudaStreamGetCaptureInfo(stream, &capture_status, nullptr, &captured, &deps, nullptr,
-                                 &ndeps) != cudaSuccess) {
+    if (CaptureDeps(stream, &capture_status, &captured, &deps, &ndeps) != cudaSuccess) {
       ok = false;
       break;
     }
@@ -1515,12 +1542,11 @@ bool Engine::Impl::CaptureConditional(cudaStream_t stream, int count, cudaGraph_
     params.conditional.type = cudaGraphCondTypeIf;
     params.conditional.size = 1;
     cudaGraphNode_t cond = nullptr;
-    if (cudaGraphAddNode(&cond, captured, deps, nullptr, ndeps, &params) != cudaSuccess) {
+    if (AddConditional(&cond, captured, deps, ndeps, &params) != cudaSuccess) {
       ok = false;
       break;
     }
-    if (cudaStreamUpdateCaptureDependencies(stream, &cond, nullptr, 1,
-                                            cudaStreamSetCaptureDependencies) != cudaSuccess) {
+    if (ReplaceCaptureDeps(stream, &cond) != cudaSuccess) {
       ok = false;
       break;
     }
@@ -2039,8 +2065,7 @@ bool Engine::Impl::CaptureFusedConditional(cudaStream_t stream, int count, float
     cudaGraph_t captured = nullptr;
     const cudaGraphNode_t* deps = nullptr;
     size_t ndeps = 0;
-    if (cudaStreamGetCaptureInfo(stream, &capture_status, nullptr, &captured, &deps, nullptr,
-                                 &ndeps) != cudaSuccess) {
+    if (CaptureDeps(stream, &capture_status, &captured, &deps, &ndeps) != cudaSuccess) {
       ok = false;
       break;
     }
@@ -2050,12 +2075,11 @@ bool Engine::Impl::CaptureFusedConditional(cudaStream_t stream, int count, float
     params.conditional.type = cudaGraphCondTypeIf;
     params.conditional.size = 1;
     cudaGraphNode_t cond = nullptr;
-    if (cudaGraphAddNode(&cond, captured, deps, nullptr, ndeps, &params) != cudaSuccess) {
+    if (AddConditional(&cond, captured, deps, ndeps, &params) != cudaSuccess) {
       ok = false;
       break;
     }
-    if (cudaStreamUpdateCaptureDependencies(stream, &cond, nullptr, 1,
-                                            cudaStreamSetCaptureDependencies) != cudaSuccess) {
+    if (ReplaceCaptureDeps(stream, &cond) != cudaSuccess) {
       ok = false;
       break;
     }
