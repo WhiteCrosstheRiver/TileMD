@@ -120,6 +120,7 @@ if(TILEMD_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(tilemd_cpu_tests tests/unit/cpu_smoke.cpp tests/unit/lj_reference_test.cpp
+                                 tests/unit/fp32_walk_test.cpp
                                  tests/unit/cluster_list_test.cpp                                  tests/unit/integrator_test.cpp
                                  tests/unit/tf32_pair_test.cpp
                                  tests/unit/pair_attention_test.cpp

@@ -44,6 +44,14 @@ int main(int argc, char** argv) {
     double length = 0.0;
     MakeFcc(cells, 0.8442, &x, &y, &z, &length);
     const int n = static_cast<int>(x.size());
+    for (int i = 0; i < n; ++i) {
+      x[i] += 0.07 * std::sin(0.7 * i);
+      y[i] += 0.05 * std::cos(0.3 * i);
+      z[i] += 0.04 * std::sin(0.5 * i + 1.0);
+      x[i] -= length * std::floor(x[i] / length);
+      y[i] -= length * std::floor(y[i] / length);
+      z[i] -= length * std::floor(z[i] / length);
+    }
     const int max_neigh = 128;
     std::vector<int> nn(n, 0);
     std::vector<int> nl(static_cast<std::size_t>(max_neigh) * n, -1);
