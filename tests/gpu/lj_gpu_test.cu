@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -826,5 +827,123 @@ TEST(GpuLj, FusedThermoMatchesTheCpuLeapfrog) {
     EXPECT_LT(max_pe, 1.0e-6) << "rebuild_every_step " << rebuild_every_step;
     EXPECT_LT(max_ke, 1.0e-6) << "rebuild_every_step " << rebuild_every_step;
     EXPECT_LT(max_w, 1.0e-6) << "rebuild_every_step " << rebuild_every_step;
+  }
+}
+
+float MaxAbsFloat(const std::vector<float>& a, const std::vector<float>& b) {
+  float gap = 0.0f;
+  for (size_t i = 0; i < a.size(); ++i) gap = std::max(gap, std::abs(a[i] - b[i]));
+  return gap;
+}
+
+double MedianOfThree(double a, double b, double c) {
+  double samples[3] = {a, b, c};
+  std::sort(samples, samples + 3);
+  return samples[1];
+}
+
+void PrintForceRate(const char* label, int n, int block, int repeats, double seconds) {
+  const double rate = static_cast<double>(n) * static_cast<double>(repeats) / seconds;
+  std::cout << std::scientific << std::setprecision(8) << label << " block " << block << " n " << n
+            << " repeats " << repeats << " median_s " << seconds << " atom_steps_per_s " << rate
+            << "\n";
+}
+
+tilemd::HostSystem FccLattice(int cells, double rho) {
+  const int n = cells * cells * cells * 4;
+  const double length = std::cbrt(static_cast<double>(n) / rho);
+  const double spacing = length / static_cast<double>(cells);
+  const double basis[4][3] = {{0.0, 0.0, 0.0}, {0.5, 0.5, 0.0}, {0.5, 0.0, 0.5}, {0.0, 0.5, 0.5}};
+  tilemd::HostSystem host;
+  host.box[0] = host.box[1] = host.box[2] = length;
+  host.shift = tilemd::Shift::None;
+  host.skin = 0.3;
+  host.dt = 0.005;
+  host.mass = 1.0;
+  host.rebuild_every_step = false;
+  tilemd::PairSpec spec;
+  spec.cutoff = 2.5;
+  host.pairs = {spec};
+  host.type.assign(static_cast<size_t>(n), 0);
+  host.x.resize(static_cast<size_t>(n));
+  host.y.resize(static_cast<size_t>(n));
+  host.z.resize(static_cast<size_t>(n));
+  int id = 0;
+  for (int ix = 0; ix < cells; ++ix) {
+    for (int iy = 0; iy < cells; ++iy) {
+      for (int iz = 0; iz < cells; ++iz) {
+        for (int b = 0; b < 4; ++b) {
+          host.x[static_cast<size_t>(id)] = (static_cast<double>(ix) + basis[b][0]) * spacing;
+          host.y[static_cast<size_t>(id)] = (static_cast<double>(iy) + basis[b][1]) * spacing;
+          host.z[static_cast<size_t>(id)] = (static_cast<double>(iz) + basis[b][2]) * spacing;
+          ++id;
+        }
+      }
+    }
+  }
+  return host;
+}
+
+double MedianForce(tilemd::Engine& engine, int block, int repeats) {
+  const double a = engine.TimeForceKernel(block, repeats);
+  const double b = engine.TimeForceKernel(block, repeats);
+  const double c = engine.TimeForceKernel(block, repeats);
+  return MedianOfThree(a, b, c);
+}
+
+// M4 force-kernel block sweep. The integrator stays at 128. Rates are force
+// evaluations on this RTX 3050, not a full timestep and not an H100 number.
+TEST(GpuLj, ForceBlockSweep) {
+  if (!HasGpu()) GTEST_SKIP() << "No CUDA device";
+  const auto dump = SourcePath("tests/validation/lammps_ref/init_32k.dump");
+  if (!std::filesystem::exists(dump)) GTEST_SKIP() << "32k initial dump is missing";
+  tilemd::HostSystem melt = LoadLammpsInitial(dump);
+  ASSERT_EQ(melt.x.size(), 32000u);
+  tilemd::Engine engine(melt);
+  const tilemd::GpuForces at128 = engine.ForcesAtBlock(128);
+  const tilemd::GpuForces at64 = engine.ForcesAtBlock(64);
+  const tilemd::GpuForces at256 = engine.ForcesAtBlock(256);
+  ASSERT_EQ(at128.overflow, 0);
+  ASSERT_EQ(at64.fx.size(), at128.fx.size());
+  ASSERT_EQ(at256.fx.size(), at128.fx.size());
+  EXPECT_EQ(MaxAbsFloat(at64.fx, at128.fx), 0.0f);
+  EXPECT_EQ(MaxAbsFloat(at64.fy, at128.fy), 0.0f);
+  EXPECT_EQ(MaxAbsFloat(at64.fz, at128.fz), 0.0f);
+  EXPECT_EQ(MaxAbsFloat(at256.fx, at128.fx), 0.0f);
+  EXPECT_EQ(MaxAbsFloat(at256.fy, at128.fy), 0.0f);
+  EXPECT_EQ(MaxAbsFloat(at256.fz, at128.fz), 0.0f);
+
+  constexpr int kRepeats = 40;
+  const int blocks[] = {64, 128, 256};
+  for (int block : blocks) {
+    PrintForceRate("melt_32k force", 32000, block, kRepeats, MedianForce(engine, block, kRepeats));
+  }
+
+  engine.Run(50);
+  double run_a = 0.0;
+  double run_b = 0.0;
+  double run_c = 0.0;
+  constexpr int kRunSteps = 200;
+  for (double* sample : {&run_a, &run_b, &run_c}) {
+    const auto t0 = std::chrono::steady_clock::now();
+    engine.Run(kRunSteps);
+    const auto t1 = std::chrono::steady_clock::now();
+    *sample = std::chrono::duration<double>(t1 - t0).count();
+  }
+  const double run_s = MedianOfThree(run_a, run_b, run_c);
+  const double run_rate = 32000.0 * static_cast<double>(kRunSteps) / run_s;
+  std::cout << std::scientific << std::setprecision(8) << "melt_32k run block 128 steps "
+            << kRunSteps << " median_s " << run_s << " atom_steps_per_s " << run_rate << "\n";
+  EXPECT_GT(run_rate, 0.0);
+
+  try {
+    tilemd::Engine lattice(FccLattice(40, 0.8442));
+    ASSERT_EQ(lattice.NumAtoms(), 256000);
+    for (int block : blocks) {
+      PrintForceRate("fcc_256k force", 256000, block, kRepeats,
+                     MedianForce(lattice, block, kRepeats));
+    }
+  } catch (const std::exception& ex) {
+    std::cout << "fcc_256k force sweep skipped: " << ex.what() << "\n";
   }
 }

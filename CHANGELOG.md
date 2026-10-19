@@ -29,6 +29,7 @@
 - M6 fused GPU leapfrog step on the cluster-tile path. Pair coordinates come from `pos4`. The host cluster list is rebuilt when the skin displacement is exceeded.
 - M6 fused leapfrog launch. On a 125-atom lattice, 100 steps stay within 2.8e-9 of the CPU leapfrog, both when the list is rebuilt every step and when two graphs of 50 steps are launched.
 - M6 fused device thermo. On that lattice, steps 0, 2, 4, 6, and 8 match the CPU leapfrog to 7.1e-7 in virial, including one captured graph.
+- M4 force-kernel block sweep on an RTX 3050. Block 128 is faster than 64 and 256. A 200-step run of the 32k melt reaches 4.47e6 atom-steps/s. G2 and G3 stay unclaimed.
 - M6 `pos4` coordinate rounding. On `melt_4000` an absolute binary32 shadow moves the force by `5.81e-5` relative to the double-precision oracle, outside the `1e-5` tolerance. One hundred leapfrog steps on the 40-atom box move positions by at most `5.69e-8`.
 - M6 cell-local shadow. `pos4.xyz` is the offset from a cell of edge 4 and `pos4.w` is the packed cell. At the magnitude of a box of length 270 the absolute shadow misses the melt force by `1.64e-3`; the cell-local shadow misses by `9.14e-6`. The fused kernel has not been launched.
 - M6 fused-step traffic on the 32k melt. Distinct global addresses in one step are 2163 bytes per atom, above the 60–110 byte target, because each kept cluster reloads `pos4`. This is a source count, not an Nsight measurement.

@@ -85,6 +85,12 @@ class Engine {
   // Rebuild cells and the neighbor list, then compute forces.
   // grow=false leaves an overflow in place so a test can see it.
   GpuForces ComputeForces(bool grow = true);
+  // Same neighbor list and pair loop as ComputeForces. block_size is 64, 128,
+  // or 256. The integrator still launches 128.
+  GpuForces ForcesAtBlock(int block_size);
+  // One neighbor build, one warmup launch, then `repeats` force launches.
+  // Returns seconds. block_size is 64, 128, or 256.
+  double TimeForceKernel(int block_size, int repeats);
   void Run(int steps);
 
   void DownloadPositions(std::vector<double>& x, std::vector<double>& y,

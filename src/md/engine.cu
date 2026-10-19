@@ -287,7 +287,8 @@ __global__ void SortNeighbors(int* nl, const int* nn, const int* gid, int n, con
   }
 }
 
-__global__ void __launch_bounds__(kBlock)
+template <int Block>
+__global__ void __launch_bounds__(Block)
     ForceKernel(const double* __restrict__ x, const double* __restrict__ y,
                 const double* __restrict__ z, const int* __restrict__ type,
                 const int* __restrict__ nn, const int* __restrict__ nl, float* fx, float* fy,
@@ -366,6 +367,34 @@ __global__ void __launch_bounds__(kBlock)
     wyz[i] = ayz;
   }
   if (!isfinite(ax) || !isfinite(ay) || !isfinite(az)) FlagNonFinite(status, i);
+}
+
+template <int Block>
+void LaunchForceBlock(cudaStream_t stream, const double* x, const double* y, const double* z,
+                      const int* type, const int* nn, const int* nl, float* fx, float* fy,
+                      float* fz, double* energy, double* wxx, double* wyy, double* wzz, double* wxy,
+                      double* wxz, double* wyz, int n, DeviceStatus* status, const int* ev_flag) {
+  const int grid = std::max(1, (n + Block - 1) / Block);
+  ForceKernel<Block><<<grid, Block, 0, stream>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx,
+                                                 wyy, wzz, wxy, wxz, wyz, n, status, ev_flag);
+}
+
+void LaunchForce(int block, cudaStream_t stream, const double* x, const double* y, const double* z,
+                 const int* type, const int* nn, const int* nl, float* fx, float* fy, float* fz,
+                 double* energy, double* wxx, double* wyy, double* wzz, double* wxy, double* wxz,
+                 double* wyz, int n, DeviceStatus* status, const int* ev_flag) {
+  if (block == 64) {
+    LaunchForceBlock<64>(stream, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy, wxz,
+                         wyz, n, status, ev_flag);
+  } else if (block == 128) {
+    LaunchForceBlock<128>(stream, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy,
+                          wxz, wyz, n, status, ev_flag);
+  } else if (block == 256) {
+    LaunchForceBlock<256>(stream, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy,
+                          wxz, wyz, n, status, ev_flag);
+  } else {
+    throw std::invalid_argument("force block size must be 64, 128, or 256");
+  }
 }
 
 __global__ void PublishRebuild(cudaGraphConditionalHandle handle, const DeviceStatus* status) {
@@ -1297,8 +1326,8 @@ void Engine::Impl::LaunchSuffix(cudaStream_t stream) {
   const double dt = system.dt;
   const double inv_mass = 1.0 / system.mass;
   SetEvFlag<<<1, 1, 0, stream>>>(ev_flag, step_counter);
-  ForceKernel<<<Grid(n), kBlock, 0, stream>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy,
-                                              wzz, wxy, wxz, wyz, n, status, ev_flag);
+  LaunchForce(kBlock, stream, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy, wxz,
+              wyz, n, status, ev_flag);
   Kick<<<Grid(n), kBlock, 0, stream>>>(vx, vy, vz, fx, fy, fz, n, dt, inv_mass);
   PartialThermo<<<Grid(n), kBlock, 0, stream>>>(vx, vy, vz, energy, wxx, wyy, wzz, wxy, wxz, wyz, n,
                                                 thermo_partial, ev_flag);
@@ -1481,8 +1510,8 @@ int Engine::Impl::BuildNeighbors(bool grow) {
 
 void Engine::Impl::ComputeForce() {
   ClearFlags();
-  ForceKernel<<<Grid(n), kBlock>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy,
-                                   wxz, wyz, n, status, nullptr);
+  LaunchForce(kBlock, nullptr, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy, wxz,
+              wyz, n, status, nullptr);
   CheckLaunch();
   forces_ready = true;
 }
@@ -2111,8 +2140,8 @@ void Engine::Impl::RecordInitialThermo() {
   if (thermo_origin_written || system.thermo_every <= 0) return;
   int one = 1;
   TILEMD_CHECK(cudaMemcpy(ev_flag, &one, sizeof(one), cudaMemcpyHostToDevice));
-  ForceKernel<<<Grid(n), kBlock>>>(x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy,
-                                   wxz, wyz, n, status, ev_flag);
+  LaunchForce(kBlock, nullptr, x, y, z, type, nn, nl, fx, fy, fz, energy, wxx, wyy, wzz, wxy, wxz,
+              wyz, n, status, ev_flag);
   PartialThermo<<<Grid(n), kBlock>>>(vx, vy, vz, energy, wxx, wyy, wzz, wxy, wxz, wyz, n,
                                      thermo_partial, ev_flag);
   FinishThermo<<<1, 1>>>(thermo_partial, npartial, thermo_ring, kThermoRing, thermo_count,
@@ -2228,6 +2257,70 @@ GpuForces Engine::ComputeForces(bool grow) {
   int overflow = impl_->BuildNeighbors(grow);
   if (!overflow) impl_->ComputeForce();
   return impl_->DownloadForces(overflow);
+}
+
+namespace {
+
+void RequireForceBlock(int block_size) {
+  if (block_size != 64 && block_size != 128 && block_size != 256) {
+    throw std::invalid_argument("force block size must be 64, 128, or 256");
+  }
+}
+
+}  // namespace
+
+GpuForces Engine::ForcesAtBlock(int block_size) {
+  RequireForceBlock(block_size);
+  impl_->Upload();
+  if (impl_->system.use_cluster_tiles) {
+    throw std::invalid_argument("force block sweep is the atom-neighbor kernel");
+  }
+  int overflow = impl_->BuildNeighbors(true);
+  if (!overflow) {
+    LaunchForce(block_size, nullptr, impl_->x, impl_->y, impl_->z, impl_->type, impl_->nn,
+                impl_->nl, impl_->fx, impl_->fy, impl_->fz, impl_->energy, impl_->wxx, impl_->wyy,
+                impl_->wzz, impl_->wxy, impl_->wxz, impl_->wyz, impl_->n, impl_->status, nullptr);
+    CheckLaunch();
+    impl_->forces_ready = true;
+  }
+  return impl_->DownloadForces(overflow);
+}
+
+double Engine::TimeForceKernel(int block_size, int repeats) {
+  RequireForceBlock(block_size);
+  if (repeats < 1) throw std::invalid_argument("force timing needs at least one launch");
+  impl_->Upload();
+  if (impl_->system.use_cluster_tiles) {
+    throw std::invalid_argument("force block sweep is the atom-neighbor kernel");
+  }
+  if (impl_->BuildNeighbors(true)) {
+    throw std::runtime_error("neighbor list overflowed before the force timing");
+  }
+  cudaStream_t stream = nullptr;
+  cudaEvent_t start = nullptr;
+  cudaEvent_t stop = nullptr;
+  TILEMD_CHECK(cudaStreamCreate(&stream));
+  TILEMD_CHECK(cudaEventCreate(&start));
+  TILEMD_CHECK(cudaEventCreate(&stop));
+  auto launch = [&]() {
+    LaunchForce(block_size, stream, impl_->x, impl_->y, impl_->z, impl_->type, impl_->nn, impl_->nl,
+                impl_->fx, impl_->fy, impl_->fz, impl_->energy, impl_->wxx, impl_->wyy, impl_->wzz,
+                impl_->wxy, impl_->wxz, impl_->wyz, impl_->n, impl_->status, nullptr);
+  };
+  launch();
+  TILEMD_CHECK(cudaStreamSynchronize(stream));
+  TILEMD_CHECK(cudaEventRecord(start, stream));
+  for (int i = 0; i < repeats; ++i) launch();
+  TILEMD_CHECK(cudaEventRecord(stop, stream));
+  TILEMD_CHECK(cudaEventSynchronize(stop));
+  float milliseconds = 0.0f;
+  TILEMD_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+  TILEMD_CHECK(cudaGetLastError());
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+  cudaStreamDestroy(stream);
+  impl_->forces_ready = true;
+  return static_cast<double>(milliseconds) * 1.0e-3;
 }
 
 void Engine::Run(int steps) {
