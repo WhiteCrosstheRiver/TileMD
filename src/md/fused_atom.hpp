@@ -33,10 +33,12 @@ Fp32Force FusedAtomForce(const double* box, const double* x, const double* y, co
 
 struct Fp32NveStats {
   double max_disp2 = 0.0;
+  int rebuilds = 0;
 };
 
 // Device state for the FP32 kick-drift. The constructor uploads once.
-// `Steps` only launches kernels. The neighbor list is not rebuilt.
+// `Steps` only launches kernels. `SkinSteps` syncs every step and, once an
+// atom has moved past half the skin, rebuilds the list on the host.
 class Fp32Session {
  public:
   Fp32Session(const double* box, const double* x, const double* y, const double* z,
@@ -49,6 +51,8 @@ class Fp32Session {
   Fp32Session& operator=(const Fp32Session&) = delete;
 
   Fp32NveStats Steps(int steps);
+  // One launch per step. A rebuild reorders the device arrays into Morton slots.
+  Fp32NveStats SkinSteps(int steps, double skin);
   void Download(double* x, double* y, double* z, double* vx, double* vy, double* vz, int* image_x,
                 int* image_y, int* image_z) const;
 

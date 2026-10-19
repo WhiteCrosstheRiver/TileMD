@@ -97,6 +97,40 @@ inline Fp32Walk HostFp32Force(const double* box, const double* x, const double* 
   return out;
 }
 
+// Morton slot order for one rebuild. Neighbor indices are built afterwards.
+inline void OrderFp32Slots(const double* box, double* x, double* y, double* z, double* vx,
+                           double* vy, double* vz, int* image_x, int* image_y, int* image_z, int n,
+                           double reach) {
+  std::vector<double> xs(x, x + n);
+  std::vector<double> ys(y, y + n);
+  std::vector<double> zs(z, z + n);
+  std::vector<double> vxs(vx, vx + n);
+  std::vector<double> vys(vy, vy + n);
+  std::vector<double> vzs(vz, vz + n);
+  std::vector<int> ixs(image_x, image_x + n);
+  std::vector<int> iys(image_y, image_y + n);
+  std::vector<int> izs(image_z, image_z + n);
+  const std::vector<int> order = MortonOrder(box, x, y, z, n, reach);
+  ApplyOrder(&xs, order);
+  ApplyOrder(&ys, order);
+  ApplyOrder(&zs, order);
+  ApplyOrder(&vxs, order);
+  ApplyOrder(&vys, order);
+  ApplyOrder(&vzs, order);
+  ApplyOrder(&ixs, order);
+  ApplyOrder(&iys, order);
+  ApplyOrder(&izs, order);
+  std::copy(xs.begin(), xs.end(), x);
+  std::copy(ys.begin(), ys.end(), y);
+  std::copy(zs.begin(), zs.end(), z);
+  std::copy(vxs.begin(), vxs.end(), vx);
+  std::copy(vys.begin(), vys.end(), vy);
+  std::copy(vzs.begin(), vzs.end(), vz);
+  std::copy(ixs.begin(), ixs.end(), image_x);
+  std::copy(iys.begin(), iys.end(), image_y);
+  std::copy(izs.begin(), izs.end(), image_z);
+}
+
 struct Fp32SkinStats {
   int rebuilds = 0;
   float max_disp2 = 0.f;
@@ -119,37 +153,7 @@ inline Fp32SkinStats HostFp32SkinSteps(const double* box, double* x, double* y, 
   }
   const double reach = static_cast<double>(pair.rc) + skin;
   const float trigger2 = static_cast<float>((skin * 0.5) * (skin * 0.5));
-  auto put_in_slot_order = [&]() {
-    std::vector<double> xs(x, x + n);
-    std::vector<double> ys(y, y + n);
-    std::vector<double> zs(z, z + n);
-    std::vector<double> vxs(vx, vx + n);
-    std::vector<double> vys(vy, vy + n);
-    std::vector<double> vzs(vz, vz + n);
-    std::vector<int> ixs(image_x, image_x + n);
-    std::vector<int> iys(image_y, image_y + n);
-    std::vector<int> izs(image_z, image_z + n);
-    const std::vector<int> order = MortonOrder(box, x, y, z, n, reach);
-    ApplyOrder(&xs, order);
-    ApplyOrder(&ys, order);
-    ApplyOrder(&zs, order);
-    ApplyOrder(&vxs, order);
-    ApplyOrder(&vys, order);
-    ApplyOrder(&vzs, order);
-    ApplyOrder(&ixs, order);
-    ApplyOrder(&iys, order);
-    ApplyOrder(&izs, order);
-    std::copy(xs.begin(), xs.end(), x);
-    std::copy(ys.begin(), ys.end(), y);
-    std::copy(zs.begin(), zs.end(), z);
-    std::copy(vxs.begin(), vxs.end(), vx);
-    std::copy(vys.begin(), vys.end(), vy);
-    std::copy(vzs.begin(), vzs.end(), vz);
-    std::copy(ixs.begin(), ixs.end(), image_x);
-    std::copy(iys.begin(), iys.end(), image_y);
-    std::copy(izs.begin(), izs.end(), image_z);
-  };
-  put_in_slot_order();
+  OrderFp32Slots(box, x, y, z, vx, vy, vz, image_x, image_y, image_z, n, reach);
   std::vector<double> xref(x, x + n);
   std::vector<double> yref(y, y + n);
   std::vector<double> zref(z, z + n);
@@ -169,7 +173,7 @@ inline Fp32SkinStats HostFp32SkinSteps(const double* box, double* x, double* y, 
     }
     stats.max_disp2 = std::max(stats.max_disp2, step_disp2);
     if (DisplacementNeedsRebuild(step_disp2, trigger2)) {
-      put_in_slot_order();
+      OrderFp32Slots(box, x, y, z, vx, vy, vz, image_x, image_y, image_z, n, reach);
       list = BuildCellList(box, x, y, z, n, reach);
       xref.assign(x, x + n);
       yref.assign(y, y + n);

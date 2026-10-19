@@ -128,12 +128,51 @@ int main(int argc, char** argv) {
       max_dx = std::max(max_dx, std::abs(z[i] - host_z[i]));
     }
     const bool nve_ok = max_dx <= 1.0e-4;
+
+    const double skin_box[3] = {20, 20, 20};
+    std::vector<double> skin_x = {5.0, 7.85};
+    std::vector<double> skin_y = {5.0, 5.0};
+    std::vector<double> skin_z = {5.0, 5.0};
+    std::vector<double> skin_vx = {0.0, -100.0};
+    std::vector<double> skin_vy = {0.0, 0.0};
+    std::vector<double> skin_vz = {0.0, 0.0};
+    std::vector<int> skin_ix = {0, 0};
+    std::vector<int> skin_iy = {0, 0};
+    std::vector<int> skin_iz = {0, 0};
+    std::vector<double> host_sx = skin_x, host_sy = skin_y, host_sz = skin_z;
+    std::vector<double> host_svx = skin_vx, host_svy = skin_vy, host_svz = skin_vz;
+    std::vector<int> host_six = skin_ix, host_siy = skin_iy, host_siz = skin_iz;
+    const tilemd::Fp32SkinStats host_skin = tilemd::HostFp32SkinSteps(
+        skin_box, host_sx.data(), host_sy.data(), host_sz.data(), host_svx.data(), host_svy.data(),
+        host_svz.data(), host_six.data(), host_siy.data(), host_siz.data(), 2, pair, dt, 1.0, 0.3,
+        1);
+    const tilemd::CellList skin_list =
+        tilemd::BuildCellList(skin_box, skin_x.data(), skin_y.data(), skin_z.data(), 2, 2.8);
+    const std::vector<double> skin_ref_x = skin_x, skin_ref_y = skin_y, skin_ref_z = skin_z;
+    tilemd::Fp32Session skin_session(skin_box, skin_x.data(), skin_y.data(), skin_z.data(),
+                                     skin_vx.data(), skin_vy.data(), skin_vz.data(), skin_ix.data(),
+                                     skin_iy.data(), skin_iz.data(), skin_ref_x.data(),
+                                     skin_ref_y.data(), skin_ref_z.data(), skin_list.nn.data(),
+                                     skin_list.nl.data(), 2, skin_list.max_neigh, pair, dt, 1.0, 1);
+    const tilemd::Fp32NveStats device_skin = skin_session.SkinSteps(1, 0.3);
+    skin_session.Download(skin_x.data(), skin_y.data(), skin_z.data(), skin_vx.data(),
+                          skin_vy.data(), skin_vz.data(), skin_ix.data(), skin_iy.data(),
+                          skin_iz.data());
+    double skin_dx = 0.0;
+    for (int i = 0; i < 2; ++i) {
+      skin_dx = std::max(skin_dx, std::abs(skin_x[i] - host_sx[i]));
+      skin_dx = std::max(skin_dx, std::abs(skin_y[i] - host_sy[i]));
+      skin_dx = std::max(skin_dx, std::abs(skin_z[i] - host_sz[i]));
+    }
+    const bool skin_ok = host_skin.rebuilds == 1 && device_skin.rebuilds == 1 && skin_dx <= 1.0e-4;
     std::cout << "n=" << n << " tpa=" << threads << " force_rms_rel=" << gate.force_rms_rel
               << " force_max_rel=" << gate.force_max_rel << " energy_rel=" << gate.energy_rel
               << " virial_rel=" << gate.virial_rel << " pass=" << (gate.pass ? 1 : 0)
               << " nve_steps=" << nve_steps << " max_dx=" << max_dx
-              << " max_disp2=" << stats.max_disp2 << " nve_ok=" << (nve_ok ? 1 : 0) << "\n";
-    return (gate.pass && nve_ok) ? 0 : 1;
+              << " max_disp2=" << stats.max_disp2 << " nve_ok=" << (nve_ok ? 1 : 0)
+              << " skin_rebuilds=" << device_skin.rebuilds << " skin_dx=" << skin_dx
+              << " skin_ok=" << (skin_ok ? 1 : 0) << "\n";
+    return (gate.pass && nve_ok && skin_ok) ? 0 : 1;
   } catch (const std::exception& err) {
     std::cerr << err.what() << "\n";
     return 2;

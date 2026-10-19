@@ -1,13 +1,17 @@
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
+#include "force/fp32_walk.hpp"
 #include "force/lj_pair.hpp"
 #include "force/shadow_delta.hpp"
 #include "md/fused_atom.hpp"
+#include "neighbor/cluster_order.hpp"
 
 namespace tilemd {
 namespace {
@@ -243,8 +247,15 @@ struct Hold {
   void* pointer[20] = {};
   int count = 0;
   void Add(void* item) { pointer[count++] = item; }
+  void Drop(void* item) {
+    for (int i = 0; i < count; ++i) {
+      if (pointer[i] == item) pointer[i] = nullptr;
+    }
+  }
   ~Hold() {
-    for (int i = 0; i < count; ++i) cudaFree(pointer[i]);
+    for (int i = 0; i < count; ++i) {
+      if (pointer[i] != nullptr) cudaFree(pointer[i]);
+    }
   }
 };
 
@@ -352,6 +363,7 @@ struct Fp32Session::Impl {
   float4* buffers[2] = {};
   int current = 0;
   int n = 0;
+  int max_neigh = 1;
   int threads_per_atom = 1;
   Fp32Lj pair;
   BoxCells cells;
@@ -450,6 +462,7 @@ Fp32Session::Fp32Session(const double* box, const double* x, const double* y, co
     Check(cudaMemcpy(impl_->nn, nn, atoms * sizeof(int), cudaMemcpyHostToDevice), "copy nn");
     Check(cudaMemcpy(impl_->nl, nl, list * sizeof(int), cudaMemcpyHostToDevice), "copy nl");
     impl_->n = n;
+    impl_->max_neigh = max_neigh;
     impl_->threads_per_atom = threads_per_atom;
     impl_->pair = pair;
     impl_->cells = CellsOf(box);
@@ -505,6 +518,78 @@ void Fp32Session::Download(double* x, double* y, double* z, double* vx, double* 
         "read image y");
   Check(cudaMemcpy(image_z, impl_->image_z, atoms * sizeof(int), cudaMemcpyDeviceToHost),
         "read image z");
+}
+
+Fp32NveStats Fp32Session::SkinSteps(int steps, double skin) {
+  if (steps <= 0) throw std::runtime_error("skin steps need at least one step");
+  if (!(skin > 0.0)) throw std::runtime_error("skin must be positive");
+  const int n = impl_->n;
+  const double reach = static_cast<double>(impl_->pair.rc) + skin;
+  const float trigger2 = static_cast<float>((skin * 0.5) * (skin * 0.5));
+  const std::size_t atoms = static_cast<std::size_t>(n);
+  auto refresh = [&]() {
+    std::vector<double> hx(atoms), hy(atoms), hz(atoms), hvx(atoms), hvy(atoms), hvz(atoms);
+    std::vector<int> ix(atoms), iy(atoms), iz(atoms);
+    Download(hx.data(), hy.data(), hz.data(), hvx.data(), hvy.data(), hvz.data(), ix.data(),
+             iy.data(), iz.data());
+    OrderFp32Slots(impl_->box, hx.data(), hy.data(), hz.data(), hvx.data(), hvy.data(), hvz.data(),
+                   ix.data(), iy.data(), iz.data(), n, reach);
+    const CellList list = BuildCellList(impl_->box, hx.data(), hy.data(), hz.data(), n, reach);
+    if (list.max_neigh > impl_->max_neigh) {
+      int* fresh = nullptr;
+      const std::size_t bytes = static_cast<std::size_t>(list.max_neigh) * atoms * sizeof(int);
+      Check(cudaMalloc(&fresh, bytes), "cudaMalloc grown nl");
+      impl_->hold.Drop(impl_->nl);
+      Check(cudaFree(impl_->nl), "free nl");
+      impl_->nl = fresh;
+      impl_->hold.Add(fresh);
+      impl_->max_neigh = list.max_neigh;
+    }
+    Check(cudaMemcpy(impl_->x, hx.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh x");
+    Check(cudaMemcpy(impl_->y, hy.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh y");
+    Check(cudaMemcpy(impl_->z, hz.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh z");
+    Check(cudaMemcpy(impl_->vx, hvx.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh vx");
+    Check(cudaMemcpy(impl_->vy, hvy.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh vy");
+    Check(cudaMemcpy(impl_->vz, hvz.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh vz");
+    Check(cudaMemcpy(impl_->xref, hx.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh xref");
+    Check(cudaMemcpy(impl_->yref, hy.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh yref");
+    Check(cudaMemcpy(impl_->zref, hz.data(), atoms * sizeof(double), cudaMemcpyHostToDevice),
+          "refresh zref");
+    Check(cudaMemcpy(impl_->image_x, ix.data(), atoms * sizeof(int), cudaMemcpyHostToDevice),
+          "refresh image x");
+    Check(cudaMemcpy(impl_->image_y, iy.data(), atoms * sizeof(int), cudaMemcpyHostToDevice),
+          "refresh image y");
+    Check(cudaMemcpy(impl_->image_z, iz.data(), atoms * sizeof(int), cudaMemcpyHostToDevice),
+          "refresh image z");
+    Check(cudaMemcpy(impl_->nn, list.nn.data(), atoms * sizeof(int), cudaMemcpyHostToDevice),
+          "refresh nn");
+    const std::size_t list_bytes = static_cast<std::size_t>(list.max_neigh) * atoms * sizeof(int);
+    Check(cudaMemcpy(impl_->nl, list.nl.data(), list_bytes, cudaMemcpyHostToDevice), "refresh nl");
+    const int encode_grid = (n + 127) / 128;
+    EncodeShadowKernel<<<encode_grid, 128>>>(impl_->x, impl_->y, impl_->z, impl_->buffers[0], n);
+    Check(cudaGetLastError(), "refresh encode");
+    Check(cudaDeviceSynchronize(), "refresh encode");
+    impl_->current = 0;
+  };
+  refresh();
+  Fp32NveStats total;
+  for (int step = 0; step < steps; ++step) {
+    const Fp32NveStats one = Steps(1);
+    total.max_disp2 = std::max(total.max_disp2, one.max_disp2);
+    if (DisplacementNeedsRebuild(static_cast<float>(one.max_disp2), trigger2)) {
+      refresh();
+      ++total.rebuilds;
+    }
+  }
+  return total;
 }
 
 void FusedAtomNve(const double* box, double* x, double* y, double* z, double* vx, double* vy,
