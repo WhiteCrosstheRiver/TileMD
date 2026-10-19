@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- After 40 FP32 steps that cross the skin, the host list still matches the double-precision oracle.
 - The device FP32 session stops the rest of a batch after the skin is crossed, then rebuilds on the host. The two-atom check is compiled and not launched.
 - Host FP32 steps rebuild the cell list after an atom moves past half the skin, and put the atoms back into Morton slot order. A pair that drifts inside the cutoff stays in the old list; a pair that starts outside rc+skin is picked up on the rebuild.
 - The engine default is a skin-triggered rebuild.

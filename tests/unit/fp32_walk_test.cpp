@@ -283,6 +283,41 @@ TEST(Fp32Walk, SkinRebuildsOnlyAfterHalfTheSkin) {
   EXPECT_LT(x[0], length);
 }
 
+void ExpectForceMatches(const double* box, const std::vector<double>& x,
+                        const std::vector<double>& y, const std::vector<double>& z,
+                        const tilemd::CellList& list);
+
+TEST(Fp32Walk, SkinListMatchesTheOracleAfterManySteps) {
+  std::vector<double> x, y, z;
+  double length = 0;
+  MakeFcc(4, &x, &y, &z, &length);
+  const int n = static_cast<int>(x.size());
+  for (int i = 0; i < n; ++i) {
+    x[i] += 0.07 * std::sin(0.7 * i);
+    y[i] += 0.05 * std::cos(0.3 * i);
+    z[i] += 0.04 * std::sin(0.5 * i + 1.0);
+    x[i] -= length * std::floor(x[i] / length);
+    y[i] -= length * std::floor(y[i] / length);
+    z[i] -= length * std::floor(z[i] / length);
+  }
+  const double box[3] = {length, length, length};
+  std::vector<double> vx(n, 1.0), vy(n, 0.0), vz(n, 0.0);
+  std::vector<int> ix(n, 0), iy(n, 0), iz(n, 0);
+  const tilemd::Fp32SkinStats skin =
+      tilemd::HostFp32SkinSteps(box, x.data(), y.data(), z.data(), vx.data(), vy.data(), vz.data(),
+                                ix.data(), iy.data(), iz.data(), n, UnitLj(), 0.005, 1.0, 0.3, 40);
+  EXPECT_GT(skin.rebuilds, 0);
+  for (int i = 0; i < n; ++i) {
+    EXPECT_GE(x[i], 0.0);
+    EXPECT_LT(x[i], length);
+    EXPECT_GE(y[i], 0.0);
+    EXPECT_LT(y[i], length);
+    EXPECT_GE(z[i], 0.0);
+    EXPECT_LT(z[i], length);
+  }
+  ExpectForceMatches(box, x, y, z, skin.list);
+}
+
 TEST(Fp32Walk, RebuildStoresMortonSlotOrder) {
   std::vector<double> x, y, z;
   double length = 0;
