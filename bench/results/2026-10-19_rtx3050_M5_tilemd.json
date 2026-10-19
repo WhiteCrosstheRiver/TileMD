@@ -1,0 +1,52 @@
+{
+  "code": "tilemd",
+  "code_version": "parent c7bc0b2 plus the path-rate test",
+  "milestone": "M5",
+  "env": {
+    "gpu_name": "NVIDIA GeForce RTX 3050",
+    "compute_capability": "8.6",
+    "clocks_locked": false
+  },
+  "note": "Wall-clock medians from GpuLj.TilePathRates with no profiler attached. The Nsight run of the same test is slower and is not these rates. Cluster-tile Run is the fused leapfrog.",
+  "melt_32k": {
+    "N": 32000,
+    "warmup_steps": 50,
+    "steps": 200,
+    "atom": {
+      "samples_s": [1.3140267, 1.1626634, 1.1902353],
+      "median_s": 1.1902353,
+      "atom_steps_per_s": 5377088.04
+    },
+    "fused": {
+      "samples_s": [3.8639284, 3.7654162, 3.882208],
+      "median_s": 3.8639284,
+      "atom_steps_per_s": 1656345.39
+    }
+  },
+  "fcc_256k": {
+    "N": 256000,
+    "rho": 0.8442,
+    "warmup_steps": 20,
+    "steps": 50,
+    "note": "fcc lattice at the melt density, not the melt configuration",
+    "atom": {
+      "samples_s": [1.503537, 1.5079975, 1.595743],
+      "median_s": 1.5079975,
+      "atom_steps_per_s": 8488077.73
+    },
+    "fused": {
+      "samples_s": [5.1722234, 5.1510649, 5.0398114],
+      "median_s": 5.1510649,
+      "atom_steps_per_s": 2484923.07
+    }
+  },
+  "nsight_force_kernel": {
+    "kernel": "TileForceKernel<0>",
+    "clusters": 4264,
+    "dram_mbyte": 23.36,
+    "bytes_per_atom": 730,
+    "registers_per_thread": 80,
+    "sm_throughput_pct_of_peak": 86.22,
+    "report": "reports/profiles/M5/tile_force_32k.txt"
+  }
+}

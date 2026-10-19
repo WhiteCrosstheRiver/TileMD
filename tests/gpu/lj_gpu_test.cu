@@ -947,3 +947,54 @@ TEST(GpuLj, ForceBlockSweep) {
     std::cout << "fcc_256k force sweep skipped: " << ex.what() << "\n";
   }
 }
+
+// Wall time of three consecutive Run intervals after warmup. The samples are
+// printed so the median is not the only recorded number.
+void TimePath(const char* label, tilemd::HostSystem host, int warmup, int steps) {
+  tilemd::Engine engine(std::move(host));
+  const int n = engine.NumAtoms();
+  if (warmup > 0) engine.Run(warmup);
+  double samples[3] = {};
+  for (int i = 0; i < 3; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    engine.Run(steps);
+    const auto t1 = std::chrono::steady_clock::now();
+    samples[i] = std::chrono::duration<double>(t1 - t0).count();
+  }
+  const double median = MedianOfThree(samples[0], samples[1], samples[2]);
+  const double rate = static_cast<double>(n) * static_cast<double>(steps) / median;
+  std::cout << std::scientific << std::setprecision(8) << label << " n " << n << " steps " << steps
+            << " samples " << samples[0] << " " << samples[1] << " " << samples[2] << " median_s "
+            << median << " atom_steps_per_s " << rate << "\n";
+  EXPECT_GT(rate, 0.0);
+}
+
+// M5/M6 rate against the atom-neighbor engine on this RTX 3050. The fused path
+// is the cluster-tile Run. 256k is an fcc lattice at the melt density.
+TEST(GpuLj, TilePathRates) {
+  if (!HasGpu()) GTEST_SKIP() << "No CUDA device";
+  const auto dump = SourcePath("tests/validation/lammps_ref/init_32k.dump");
+  if (!std::filesystem::exists(dump)) GTEST_SKIP() << "32k initial dump is missing";
+  const tilemd::HostSystem melt = LoadLammpsInitial(dump);
+  ASSERT_EQ(melt.x.size(), 32000u);
+  TimePath("melt_32k atom", melt, 50, 200);
+  tilemd::HostSystem fused = melt;
+  fused.use_cluster_tiles = true;
+  fused.rebuild_every_step = false;
+  TimePath("melt_32k fused", fused, 50, 200);
+
+  const tilemd::HostSystem lattice = FccLattice(40, 0.8442);
+  try {
+    TimePath("fcc_256k atom", lattice, 20, 50);
+  } catch (const std::exception& ex) {
+    std::cout << "fcc_256k atom skipped: " << ex.what() << "\n";
+  }
+  try {
+    tilemd::HostSystem fused_lattice = lattice;
+    fused_lattice.use_cluster_tiles = true;
+    fused_lattice.rebuild_every_step = false;
+    TimePath("fcc_256k fused", fused_lattice, 20, 50);
+  } catch (const std::exception& ex) {
+    std::cout << "fcc_256k fused skipped: " << ex.what() << "\n";
+  }
+}
