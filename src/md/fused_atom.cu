@@ -420,9 +420,8 @@ void FusedAtomNve(const double* box, double* x, double* y, double* z, double* vx
   const BoxCells cells = CellsOf(box);
   float4* buffers[2] = {pos0, pos1};
   int current = 0;
-  stats->max_disp2 = 0.0;
+  Check(cudaMemset(bits, 0, sizeof(int)), "clear disp");
   for (int step = 0; step < steps; ++step) {
-    Check(cudaMemset(bits, 0, sizeof(int)), "clear disp");
     const int next = 1 - current;
     if (threads_per_atom == 1) {
       LaunchStep<1>(buffers[current], buffers[next], dx, dy, dz, dvx, dvy, dvz, ix, iy, iz, xref,
@@ -438,15 +437,14 @@ void FusedAtomNve(const double* box, double* x, double* y, double* z, double* vx
                     yref, zref, dnn, dnl, n, pair, cells, dt, mass, box[0], box[1], box[2], bits);
     }
     Check(cudaGetLastError(), "fused atom step launch");
-    Check(cudaDeviceSynchronize(), "fused atom step");
-    int host_bits = 0;
-    Check(cudaMemcpy(&host_bits, bits, sizeof(int), cudaMemcpyDeviceToHost), "copy disp");
-    float disp_bits = 0.f;
-    std::memcpy(&disp_bits, &host_bits, sizeof(disp_bits));
-    const double disp2 = static_cast<double>(disp_bits);
-    if (disp2 > stats->max_disp2) stats->max_disp2 = disp2;
     current = next;
   }
+  Check(cudaDeviceSynchronize(), "fused atom step");
+  int host_bits = 0;
+  Check(cudaMemcpy(&host_bits, bits, sizeof(int), cudaMemcpyDeviceToHost), "copy disp");
+  float disp_bits = 0.f;
+  std::memcpy(&disp_bits, &host_bits, sizeof(disp_bits));
+  stats->max_disp2 = static_cast<double>(disp_bits);
 
   Check(cudaMemcpy(x, dx, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read x");
   Check(cudaMemcpy(y, dy, atoms * sizeof(double), cudaMemcpyDeviceToHost), "read y");

@@ -35,8 +35,10 @@ struct Fp32NveStats {
   double max_disp2 = 0.0;
 };
 
-// One launch per step. FP32 pair force, then symplectic Euler on the double
-// master coordinates. The neighbor list is not rebuilt.
+// One launch per step, queued on the default stream and synced once at the end.
+// FP32 pair force, then symplectic Euler on the double master coordinates.
+// The neighbor list is not rebuilt. `max_disp2` is the largest squared
+// displacement from the reference over the whole run.
 void FusedAtomNve(const double* box, double* x, double* y, double* z, double* vx, double* vy,
                   double* vz, int* image_x, int* image_y, int* image_z, const double* x_ref,
                   const double* y_ref, const double* z_ref, const int* nn, const int* nl, int n,

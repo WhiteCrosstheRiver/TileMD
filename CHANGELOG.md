@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- FP32 fused kick-drift step. One launch per step updates the double master coordinates from the cell-local pair force. `tilemd_fp32_check` compares five steps at one thread per atom with the host walk. That binary is compiled and has not been launched.
+- FP32 fused kick-drift step. The steps are queued and the host syncs once at the end. `tilemd_fp32_check` compares five steps at one thread per atom with the host walk. That binary is compiled and has not been launched.
 - Host FP32 neighbor walk. On a displaced 864-atom fcc it passes T1-v2 against the double oracle. A perfect lattice does not: its net force is roundoff, so the force ratio is noise. Ten kick-drift steps stay inside the box.
 - FP32 LJ pair function and cell-local minimum image. On boxes of length 32 and 33.5 the shadow delta matches the double minimum image. The fused atom-list force kernel builds as `tilemd_fp32_check` and is not the engine default yet.
 - Speed-phase baseline harness. `tilemd_bench` times `atom`, `fused-tile`, and `atom-ref` with the section 8 step counts. `bench/scripts/run_bench.py` writes the JSON and `reports/SPEED.md`.
