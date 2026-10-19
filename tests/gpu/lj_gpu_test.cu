@@ -743,6 +743,60 @@ TEST(GpuLj, FusedLeapfrogMatchesTheCpuFor100Steps) {
   }
 }
 
+// Same lattice, one velocity large enough that the center of mass moves past
+// half the skin. The skin-gated graph has to refresh the list or fall back.
+TEST(GpuLj, FusedLeapfrogCrossesHalfTheSkin) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const tilemd::ref::System origin = LatticeBox();
+  const int n = static_cast<int>(origin.x.size());
+  std::vector<double> vx(static_cast<size_t>(n), 0.4);
+  std::vector<double> vy(static_cast<size_t>(n), 0.0);
+  std::vector<double> vz(static_cast<size_t>(n), 0.0);
+  constexpr double dt = 0.005;
+  constexpr double mass = 1.0;
+  tilemd::ref::System cpu_system = origin;
+  tilemd::ref::Dynamics cpu = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  tilemd::ref::PrepareLeapfrog(cpu_system, cpu, dt, mass);
+  for (int step = 0; step < 100; ++step) {
+    tilemd::ref::LeapfrogStep(cpu_system, cpu, dt, mass);
+  }
+  const double moved = MaxAbsDelta(cpu.x, origin.x);
+  EXPECT_GT(moved, 0.15);
+
+  const bool rebuilds[] = {true, false};
+  for (bool rebuild_every_step : rebuilds) {
+    tilemd::HostSystem host = FromReference(origin, 0.3, 0, rebuild_every_step);
+    host.use_cluster_tiles = true;
+    host.dt = dt;
+    host.mass = mass;
+    host.graph_unroll = 50;
+    host.vx = vx;
+    host.vy = vy;
+    host.vz = vz;
+    tilemd::Engine engine(std::move(host));
+    engine.Run(100);
+    std::vector<double> x;
+    std::vector<double> y;
+    std::vector<double> z;
+    std::vector<double> gvx;
+    std::vector<double> gvy;
+    std::vector<double> gvz;
+    engine.DownloadPositions(x, y, z);
+    engine.DownloadVelocities(gvx, gvy, gvz);
+    const double max_x =
+        std::max(MaxAbsDelta(x, cpu.x), std::max(MaxAbsDelta(y, cpu.y), MaxAbsDelta(z, cpu.z)));
+    const double max_v = std::max(MaxAbsDelta(gvx, cpu.vx),
+                                  std::max(MaxAbsDelta(gvy, cpu.vy), MaxAbsDelta(gvz, cpu.vz)));
+    std::cout << std::scientific << std::setprecision(8) << "fused skin rebuild " << std::boolalpha
+              << rebuild_every_step << " moved " << moved << " max |dx| " << max_x << " max |dv| "
+              << max_v << " rebuilds " << engine.RebuildCount() << "\n";
+    EXPECT_TRUE(std::isfinite(max_x));
+    EXPECT_TRUE(std::isfinite(max_v));
+    EXPECT_LT(max_x, 1.0e-7) << "rebuild_every_step " << rebuild_every_step;
+    EXPECT_LT(max_v, 1.0e-7) << "rebuild_every_step " << rebuild_every_step;
+  }
+}
+
 TEST(GpuLj, FusedThermoMatchesTheCpuLeapfrog) {
   if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
   const tilemd::ref::System origin = LatticeBox();
