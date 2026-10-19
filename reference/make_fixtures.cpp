@@ -73,20 +73,84 @@ System MakeFcc(int cells, double rho) {
   return system;
 }
 
+double PairSigma(const System& system, int type_i, int type_j) {
+  for (const PairCoeff& coeff : system.pairs) {
+    if ((coeff.type_i == type_i && coeff.type_j == type_j) ||
+        (coeff.type_i == type_j && coeff.type_j == type_i)) {
+      return coeff.sigma;
+    }
+  }
+  return kSigma;
+}
+
+double MinImage(double delta, double length) { return delta - length * std::rint(delta / length); }
+
+bool Fits(const System& system, double x, double y, double z, int type) {
+  constexpr double kMinFactor = 0.85;
+  const int n = static_cast<int>(system.x.size());
+  for (int i = 0; i < n; ++i) {
+    const double dx = MinImage(x - system.x[i], system.box[0]);
+    const double dy = MinImage(y - system.y[i], system.box[1]);
+    const double dz = MinImage(z - system.z[i], system.box[2]);
+    const double rmin = kMinFactor * PairSigma(system, type, system.type[i]);
+    if (dx * dx + dy * dy + dz * dz < rmin * rmin) return false;
+  }
+  return true;
+}
+
+void RequireMinDistance(const System& system, const char* name) {
+  const int n = static_cast<int>(system.x.size());
+  for (int i = 0; i < n; ++i) {
+    for (int j = i + 1; j < n; ++j) {
+      const double dx = MinImage(system.x[i] - system.x[j], system.box[0]);
+      const double dy = MinImage(system.y[i] - system.y[j], system.box[1]);
+      const double dz = MinImage(system.z[i] - system.z[j], system.box[2]);
+      const double rmin = 0.85 * PairSigma(system, system.type[i], system.type[j]);
+      if (dx * dx + dy * dy + dz * dz < rmin * rmin) {
+        throw std::runtime_error(std::string(name) + " pair is closer than 0.85 sigma");
+      }
+    }
+  }
+}
+
+bool Place(System* system, double x, double y, double z, int type) {
+  if (!Fits(*system, x, y, z, type)) return false;
+  system->type.push_back(type);
+  system->x.push_back(x);
+  system->y.push_back(y);
+  system->z.push_back(z);
+  return true;
+}
+
 System MakeRandom(int n, double rho, std::mt19937* rng) {
   System system;
   const double length = std::cbrt(static_cast<double>(n) / rho);
   system.box[0] = system.box[1] = system.box[2] = length;
   SetMono(system);
   std::uniform_real_distribution<double> unit(0.0, 1.0);
-  system.type.assign(n, 0);
-  system.x.resize(n);
-  system.y.resize(n);
-  system.z.resize(n);
-  for (int i = 0; i < n; ++i) {
-    system.x[i] = unit(*rng) * length;
-    system.y[i] = unit(*rng) * length;
-    system.z[i] = unit(*rng) * length;
+  int attempts = 0;
+  while (static_cast<int>(system.x.size()) < n) {
+    if (++attempts > n * 100000) throw std::runtime_error("random fixture could not place an atom");
+    Place(&system, unit(*rng) * length, unit(*rng) * length, unit(*rng) * length, 0);
+  }
+  return system;
+}
+
+System MakeDenseGrid(int n, double rho) {
+  System system;
+  const double length = std::cbrt(static_cast<double>(n) / rho);
+  system.box[0] = system.box[1] = system.box[2] = length;
+  SetMono(system);
+  const int side = static_cast<int>(std::ceil(std::cbrt(static_cast<double>(n))));
+  const double spacing = length / static_cast<double>(side);
+  for (int iz = 0; iz < side && static_cast<int>(system.x.size()) < n; ++iz) {
+    for (int iy = 0; iy < side && static_cast<int>(system.x.size()) < n; ++iy) {
+      for (int ix = 0; ix < side && static_cast<int>(system.x.size()) < n; ++ix) {
+        if (!Place(&system, (ix + 0.5) * spacing, (iy + 0.5) * spacing, (iz + 0.5) * spacing, 0)) {
+          throw std::runtime_error("dense grid pair is closer than 0.85 sigma");
+        }
+      }
+    }
   }
   return system;
 }
@@ -98,48 +162,25 @@ System MakeBoundary() {
   System system;
   system.box[0] = system.box[1] = system.box[2] = kLength;
   SetMono(system);
+  std::mt19937 rng(kSeed);
+  std::uniform_real_distribution<double> span(0.0, kLength);
   const double faces[2] = {kEps, kLength - kEps};
-  for (double x : faces) {
-    for (double y : faces) {
-      for (double z : faces) {
-        system.type.push_back(0);
-        system.x.push_back(x);
-        system.y.push_back(y);
-        system.z.push_back(z);
-      }
-    }
-  }
-  const double mid = 0.5 * kLength;
-  for (int axis = 0; axis < 3; ++axis) {
-    for (double a : faces) {
-      for (double b : faces) {
-        double coord[3] = {mid, mid, mid};
-        coord[(axis + 1) % 3] = a;
-        coord[(axis + 2) % 3] = b;
-        system.type.push_back(0);
-        system.x.push_back(coord[0]);
-        system.y.push_back(coord[1]);
-        system.z.push_back(coord[2]);
-      }
-    }
-  }
   for (int axis = 0; axis < 3; ++axis) {
     for (double face : faces) {
-      double coord[3] = {mid, mid, mid};
-      coord[axis] = face;
-      system.type.push_back(0);
-      system.x.push_back(coord[0]);
-      system.y.push_back(coord[1]);
-      system.z.push_back(coord[2]);
+      bool placed = false;
+      for (int attempt = 0; attempt < 100000 && !placed; ++attempt) {
+        double coord[3] = {span(rng), span(rng), span(rng)};
+        coord[axis] = face;
+        placed = Place(&system, coord[0], coord[1], coord[2], 0);
+      }
+      if (!placed) throw std::runtime_error("boundary fixture could not place a face atom");
     }
   }
-  std::mt19937 rng(kSeed);
-  std::uniform_real_distribution<double> interior(kEps, kLength - kEps);
+  int attempts = 0;
   while (static_cast<int>(system.x.size()) < kN) {
-    system.type.push_back(0);
-    system.x.push_back(interior(rng));
-    system.y.push_back(interior(rng));
-    system.z.push_back(interior(rng));
+    if (++attempts > kN * 100000)
+      throw std::runtime_error("boundary fixture could not place an atom");
+    Place(&system, span(rng), span(rng), span(rng), 0);
   }
   return system;
 }
@@ -186,11 +227,15 @@ System MakeTwoType() {
   std::mt19937 rng(kSeed + 1);
   std::uniform_real_distribution<double> unit(0.0, 1.0);
   for (int type = 0; type < 2; ++type) {
-    for (int i = 0; i < kEach; ++i) {
-      system.type.push_back(type);
-      system.x.push_back(unit(rng) * length);
-      system.y.push_back(unit(rng) * length);
-      system.z.push_back(unit(rng) * length);
+    int placed = 0;
+    int attempts = 0;
+    while (placed < kEach) {
+      if (++attempts > kEach * 100000) {
+        throw std::runtime_error("two-type fixture could not place an atom");
+      }
+      if (Place(&system, unit(rng) * length, unit(rng) * length, unit(rng) * length, type)) {
+        ++placed;
+      }
     }
   }
   return system;
@@ -250,11 +295,21 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories(fixture_dir);
     std::mt19937 rng(kSeed);
     WriteFixture(fixture_dir, "fcc_500", MakeFcc(5, kRhoMelt));
-    WriteFixture(fixture_dir, "boundary_500", MakeBoundary());
+    const System boundary = MakeBoundary();
+    RequireMinDistance(boundary, "boundary_500");
+    WriteFixture(fixture_dir, "boundary_500", boundary);
     WriteFixture(fixture_dir, "cutoff_500", MakeCutoff());
-    WriteFixture(fixture_dir, "twotype_2000", MakeTwoType());
-    WriteFixture(fixture_dir, "dilute_1000", MakeRandom(1000, 0.05, &rng));
-    WriteFixture(fixture_dir, "dense_2000", MakeRandom(2000, 1.2, &rng));
+    const System twotype = MakeTwoType();
+    RequireMinDistance(twotype, "twotype_2000");
+    WriteFixture(fixture_dir, "twotype_2000", twotype);
+    const System dilute = MakeRandom(1000, 0.05, &rng);
+    RequireMinDistance(dilute, "dilute_1000");
+    WriteFixture(fixture_dir, "dilute_1000", dilute);
+    // Uniform rejection jams before rho 1.2 at a core of 0.85. A cubic grid
+    // still has a nearest neighbor above that core.
+    const System dense = MakeDenseGrid(2000, 1.2);
+    RequireMinDistance(dense, "dense_2000");
+    WriteFixture(fixture_dir, "dense_2000", dense);
     if (argc == 4) WriteMelt(fixture_dir, validation_dir, argv[3]);
     return 0;
   } catch (const std::exception& error) {

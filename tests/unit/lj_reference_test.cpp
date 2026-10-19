@@ -239,3 +239,50 @@ TEST(Reference, PerAtomVirialSumsToTheGlobalTensor) {
   EXPECT_NEAR(obs.wxy[0], 0.0, 1.0e-12);
   EXPECT_NEAR(obs.wyy[0], 0.0, 1.0e-12);
 }
+
+double SigmaOf(const System& system, int type_i, int type_j) {
+  for (const PairCoeff& coeff : system.pairs) {
+    if ((coeff.type_i == type_i && coeff.type_j == type_j) ||
+        (coeff.type_i == type_j && coeff.type_j == type_i)) {
+      return coeff.sigma;
+    }
+  }
+  return 1.0;
+}
+
+double MinImage(double delta, double length) { return delta - length * std::rint(delta / length); }
+
+// FP32 fixtures. The old near-contact copies live in tests/fixtures/stress.
+TEST(LjReference, PhysicalFixturesStayOutsideTheCore) {
+  const char* names[] = {"boundary_500", "dense_2000", "twotype_2000", "dilute_1000"};
+  for (const char* name : names) {
+    const auto xyz = SourcePath(std::string("tests/fixtures/") + name + ".extxyz");
+    const auto json = SourcePath(std::string("tests/fixtures/") + name + ".json");
+    System system = tilemd::ref::ReadExtxyz(xyz.string());
+    tilemd::ref::ReadSystemHeader(json.string(), system);
+    const int n = static_cast<int>(system.x.size());
+    double closest = 1.0e300;
+    for (int i = 0; i < n; ++i) {
+      for (int j = i + 1; j < n; ++j) {
+        const double dx = MinImage(system.x[i] - system.x[j], system.box[0]);
+        const double dy = MinImage(system.y[i] - system.y[j], system.box[1]);
+        const double dz = MinImage(system.z[i] - system.z[j], system.box[2]);
+        const double sigma = SigmaOf(system, system.type[i], system.type[j]);
+        closest = std::min(closest, std::sqrt(dx * dx + dy * dy + dz * dz) / sigma);
+      }
+    }
+    EXPECT_GE(closest, 0.85) << name;
+  }
+  System boundary =
+      tilemd::ref::ReadExtxyz(SourcePath("tests/fixtures/boundary_500.extxyz").string());
+  int near_face = 0;
+  for (int i = 0; i < static_cast<int>(boundary.x.size()); ++i) {
+    const double coords[3] = {boundary.x[i], boundary.y[i], boundary.z[i]};
+    for (int axis = 0; axis < 3; ++axis) {
+      const double wrapped =
+          coords[axis] - boundary.box[axis] * std::floor(coords[axis] / boundary.box[axis]);
+      if (wrapped <= 1.0e-3 || boundary.box[axis] - wrapped <= 1.0e-3) ++near_face;
+    }
+  }
+  EXPECT_GE(near_face, 6);
+}
