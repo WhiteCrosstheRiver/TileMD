@@ -1212,8 +1212,12 @@ void Engine::Impl::WriteDump(int step, bool append) {
       identity[static_cast<size_t>(s)] = s;
     }
   }
+  const char* shift_name = "none";
+  if (system.shift == Shift::Energy) shift_name = "energy";
+  if (system.shift == Shift::Force) shift_name = "force";
   WriteEmergencyFrame(system.dump_path, system.box, hx.data(), hy.data(), hz.data(), hvx.data(),
-                      hvy.data(), hvz.data(), type_gid.data(), identity.data(), n, step, append);
+                      hvy.data(), hvz.data(), type_gid.data(), identity.data(), n, step, append,
+                      shift_name);
 }
 
 void Engine::Impl::ClearFlags() {

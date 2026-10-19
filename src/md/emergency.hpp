@@ -11,6 +11,6 @@ std::string NonFiniteMessage(int step, int gid);
 void WriteEmergencyFrame(const std::string& path, const double* box, const double* x,
                          const double* y, const double* z, const double* vx, const double* vy,
                          const double* vz, const int* type, const int* gid, int n, int step,
-                         bool append = false);
+                         bool append = false, const char* shift = "none");
 
 }  // namespace tilemd

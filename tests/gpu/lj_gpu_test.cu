@@ -1046,3 +1046,71 @@ TEST(GpuLj, AttentionOverhead) {
   // The ratio moves with the unlocked clocks, so the test does not lock it.
   EXPECT_GT(overhead, 0.0);
 }
+
+// Device Run writes extended XYZ at dump_every, in original-gid order, and the
+// project's reader can load it. The fused frame stores the leapfrog velocity.
+TEST(GpuLj, DumpFramesReload) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  const tilemd::ref::System origin = LatticeBox();
+  const int n = static_cast<int>(origin.x.size());
+  std::vector<double> vx(static_cast<size_t>(n));
+  std::vector<double> vy(static_cast<size_t>(n));
+  std::vector<double> vz(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] = 0.02 * ((i % 5) - 2);
+    vy[static_cast<size_t>(i)] = 0.015 * ((i % 4) - 1);
+    vz[static_cast<size_t>(i)] = 0.01 * ((i % 3) - 1);
+  }
+  const bool tiles[] = {false, true};
+  for (bool use_tiles : tiles) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      (use_tiles ? "tilemd-fused-dump.extxyz" : "tilemd-atom-dump.extxyz");
+    std::filesystem::remove(path);
+    tilemd::HostSystem host = FromReference(origin, 0.3, 0, true);
+    host.use_cluster_tiles = use_tiles;
+    host.dt = 0.005;
+    host.mass = 1.0;
+    host.vx = vx;
+    host.vy = vy;
+    host.vz = vz;
+    host.dump_every = 2;
+    host.dump_path = path.string();
+    {
+      tilemd::Engine engine(std::move(host));
+      engine.Run(4);
+      std::vector<double> x;
+      std::vector<double> y;
+      std::vector<double> z;
+      std::vector<double> out_vx;
+      std::vector<double> out_vy;
+      std::vector<double> out_vz;
+      engine.DownloadPositions(x, y, z);
+      engine.DownloadVelocities(out_vx, out_vy, out_vz);
+      const tilemd::ref::ExtxyzFrame first = tilemd::ref::ReadExtxyzFrame(path.string(), 0);
+      const tilemd::ref::ExtxyzFrame last = tilemd::ref::ReadExtxyzFrame(path.string(), 2);
+      EXPECT_THROW(tilemd::ref::ReadExtxyzFrame(path.string(), 3), std::runtime_error);
+      EXPECT_EQ(first.system.shift, tilemd::ref::Shift::Force);
+      EXPECT_EQ(static_cast<int>(first.system.x.size()), n);
+      EXPECT_LT(MaxAbsDelta(first.system.x, origin.x), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(first.system.y, origin.y), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(first.system.z, origin.z), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(last.system.x, x), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(last.system.y, y), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(last.system.z, z), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(last.vx, out_vx), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(last.vy, out_vy), 1.0e-12);
+      EXPECT_LT(MaxAbsDelta(last.vz, out_vz), 1.0e-12);
+      const double kicked =
+          std::max(MaxAbsDelta(first.vx, vx),
+                   std::max(MaxAbsDelta(first.vy, vy), MaxAbsDelta(first.vz, vz)));
+      if (use_tiles) {
+        EXPECT_GT(kicked, 1.0e-6);
+      } else {
+        EXPECT_LT(kicked, 1.0e-12);
+      }
+      std::cout << "dump tiles " << std::boolalpha << use_tiles << " frames 3 step0 |dv| " << kicked
+                << "\n";
+    }
+    std::filesystem::remove(path);
+  }
+}
