@@ -14,6 +14,7 @@ using tilemd::ref::Observables;
 using tilemd::ref::PairCoeff;
 using tilemd::ref::Shift;
 using tilemd::ref::System;
+using tilemd::ref::T1v2;
 
 PairCoeff Mono() {
   PairCoeff coeff;
@@ -285,4 +286,23 @@ TEST(LjReference, PhysicalFixturesStayOutsideTheCore) {
     }
   }
   EXPECT_GE(near_face, 6);
+}
+
+TEST(LjReference, T1v2AcceptsTheOracleAndRejectsALargeForce) {
+  System system = PairAt(1.2, Shift::None);
+  const Observables oracle = Compute(system);
+  const T1v2 same = tilemd::ref::CompareT1v2(oracle, oracle);
+  EXPECT_TRUE(same.pass);
+  EXPECT_EQ(same.force_rms_rel, 0.0);
+  Observables bad = oracle;
+  bad.fx[0] += 1.0;
+  const T1v2 moved = tilemd::ref::CompareT1v2(bad, oracle);
+  EXPECT_FALSE(moved.pass);
+  EXPECT_GT(moved.force_rms_rel, 1.0e-5);
+}
+
+TEST(LjReference, T4v2PassesTheRecordedDoubleDrift) {
+  // Recorded six-digit slopes. LAMMPS standard error is 2.2e-10.
+  EXPECT_TRUE(tilemd::ref::PassesT4v2(-3.5e-10, 1.5e-10, 2.2e-10));
+  EXPECT_FALSE(tilemd::ref::PassesT4v2(-1.0e-8, 1.5e-10, 2.2e-10));
 }

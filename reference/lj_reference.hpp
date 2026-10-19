@@ -38,6 +38,9 @@ struct Observables {
   double potential_energy = 0.0;
   // xx, yy, zz, xy, xz, yz. Full-list definition, including the factor 1/2.
   double virial[6] = {};
+  // Sum over unique pairs of |r_ij · F_ij|. The virial gate divides by this,
+  // not by the cancelled tensor.
+  double pair_abs = 0.0;
   // Same components, one row per atom. Their sums are `virial`.
   std::vector<double> wxx;
   std::vector<double> wyy;
@@ -140,5 +143,19 @@ struct Langevin {
 
 void LangevinBaoabStep(System& system, Dynamics& state, double dt, double mass,
                        const Langevin& thermo, std::uint64_t step);
+
+// REVIEW_AND_PLAN_v2 F4. Double paths keep the older max-error ratio.
+struct T1v2 {
+  double force_rms_rel = 0.0;
+  double force_max_rel = 0.0;
+  double energy_rel = 0.0;
+  double virial_rel = 0.0;
+  bool pass = false;
+};
+
+T1v2 CompareT1v2(const Observables& got, const Observables& reference);
+
+// |slope_tile| <= max(2 |slope_lammps|, 3 se_lammps).
+bool PassesT4v2(double slope_tile, double slope_lammps, double se_lammps);
 
 }  // namespace tilemd::ref

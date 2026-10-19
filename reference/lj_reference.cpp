@@ -1,5 +1,6 @@
 #include "lj_reference.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -197,6 +198,7 @@ Observables Compute(const System& system) {
       out.fz[i] += fz;
       out.energy[i] += 0.5 * u;
       out.potential_energy += 0.5 * u;
+      out.pair_abs += 0.5 * std::abs(dx * fx + dy * fy + dz * fz);
       const double wxx = 0.5 * dx * fx;
       const double wyy = 0.5 * dy * fy;
       const double wzz = 0.5 * dz * fz;
@@ -837,6 +839,48 @@ void LangevinBaoabStep(System& system, Dynamics& state, double dt, double mass,
     state.vy[static_cast<size_t>(i)] += half * second.fy[static_cast<size_t>(i)];
     state.vz[static_cast<size_t>(i)] += half * second.fz[static_cast<size_t>(i)];
   }
+}
+
+T1v2 CompareT1v2(const Observables& got, const Observables& reference) {
+  const int n = static_cast<int>(reference.fx.size());
+  if (n < 1 || static_cast<int>(got.fx.size()) != n) {
+    throw std::runtime_error("T1-v2 force vectors have different lengths");
+  }
+  double sum_delta = 0.0;
+  double sum_ref = 0.0;
+  double max_delta = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const double dx = got.fx[static_cast<size_t>(i)] - reference.fx[static_cast<size_t>(i)];
+    const double dy = got.fy[static_cast<size_t>(i)] - reference.fy[static_cast<size_t>(i)];
+    const double dz = got.fz[static_cast<size_t>(i)] - reference.fz[static_cast<size_t>(i)];
+    const double d2 = dx * dx + dy * dy + dz * dz;
+    sum_delta += d2;
+    const double fx = reference.fx[static_cast<size_t>(i)];
+    const double fy = reference.fy[static_cast<size_t>(i)];
+    const double fz = reference.fz[static_cast<size_t>(i)];
+    sum_ref += fx * fx + fy * fy + fz * fz;
+    max_delta = std::max(max_delta, std::sqrt(d2));
+  }
+  const double rms = std::sqrt(sum_ref / static_cast<double>(n));
+  const double scale = std::max(rms, 1.0e-30);
+  T1v2 out;
+  out.force_rms_rel = std::sqrt(sum_delta / static_cast<double>(n)) / scale;
+  out.force_max_rel = max_delta / scale;
+  const double energy_scale = std::max(std::abs(reference.potential_energy), 1.0e-30);
+  out.energy_rel = std::abs(got.potential_energy - reference.potential_energy) / energy_scale;
+  const double virial_scale = std::max(reference.pair_abs, 1.0e-30);
+  double virial_delta = 0.0;
+  for (int k = 0; k < 6; ++k) {
+    virial_delta = std::max(virial_delta, std::abs(got.virial[k] - reference.virial[k]));
+  }
+  out.virial_rel = virial_delta / virial_scale;
+  out.pass = out.force_rms_rel <= 1.0e-5 && out.force_max_rel <= 2.0e-4 &&
+             out.energy_rel <= 1.0e-6 && out.virial_rel <= 1.0e-5;
+  return out;
+}
+
+bool PassesT4v2(double slope_tile, double slope_lammps, double se_lammps) {
+  return std::abs(slope_tile) <= std::max(2.0 * std::abs(slope_lammps), 3.0 * se_lammps);
 }
 
 }  // namespace tilemd::ref
