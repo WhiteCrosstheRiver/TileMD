@@ -1,0 +1,57 @@
+{
+  "code": "tilemd",
+  "milestone": "speed-baseline",
+  "system": {
+    "name": "lj_melt",
+    "N": 32000,
+    "rho": 0.8442,
+    "rc": 2.5,
+    "skin": 0.3,
+    "dt": 0.005
+  },
+  "settings": {
+    "path": "atom",
+    "list": "full",
+    "graph_unroll": 50,
+    "rebuild_every_step": false,
+    "warmup": 1000,
+    "protocol_steps": 100000,
+    "note": "fused-tile is the cluster-tile Run. There is no separate tile integrator."
+  },
+  "runs": [
+    {
+      "path": "atom",
+      "n": 32000,
+      "warmup": 1000,
+      "steps": 100000,
+      "t_loop_s": 602.092917,
+      "atom_steps_per_s": 5314794.3,
+      "rebuilds": 12760,
+      "timer": "host wall clock around Engine::Run",
+      "repeat": 1
+    },
+    {
+      "path": "atom",
+      "n": 32000,
+      "warmup": 1000,
+      "steps": 100000,
+      "t_loop_s": 590.225687,
+      "atom_steps_per_s": 5421654.92,
+      "rebuilds": 12760,
+      "timer": "host wall clock around Engine::Run",
+      "repeat": 2
+    },
+    {
+      "path": "atom",
+      "n": 32000,
+      "warmup": 1000,
+      "steps": 100000,
+      "t_loop_s": 590.12454,
+      "atom_steps_per_s": 5422584.18,
+      "rebuilds": 12760,
+      "timer": "host wall clock around Engine::Run",
+      "repeat": 3
+    }
+  ],
+  "median_atom_steps_per_s": 5421654.92
+}
