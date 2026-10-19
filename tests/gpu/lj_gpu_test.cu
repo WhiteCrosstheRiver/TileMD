@@ -22,6 +22,7 @@
 #include "force/tile_attention.hpp"
 #include "lj_reference.hpp"
 #include "md/engine.hpp"
+#include "md/run_plan.hpp"
 #include "md/tile_force.hpp"
 #include "md/tile_rebuild.hpp"
 #include "md/tile_thermo.hpp"
@@ -1230,4 +1231,65 @@ TEST(GpuLj, NonFiniteAbortWritesTheFrame) {
   EXPECT_EQ(atom0.empty(), false);
   EXPECT_EQ(atom1.empty(), false);
   std::cout << "emergency frame: " << count << " | " << comment << "\n";
+}
+
+// graph_unroll 30 does not divide a 1000-step segment: 33 graphs of 30 and one
+// tail graph of 10. The atom-neighbor engine must advance all 1000 steps.
+TEST(GpuLj, TailGraphMatchesTheCpu) {
+  if (!HasGpu()) GTEST_SKIP() << "no CUDA device";
+  constexpr int kSteps = 1000;
+  constexpr int kUnroll = 30;
+  const int unroll = tilemd::GraphUnroll(kUnroll, kSteps);
+  const tilemd::SegmentLaunch plan = tilemd::SegmentSteps(kSteps, unroll);
+  ASSERT_EQ(plan.graphs, 33);
+  ASSERT_EQ(plan.tail, 10);
+
+  const tilemd::ref::System origin = LatticeBox();
+  const int n = static_cast<int>(origin.x.size());
+  std::vector<double> vx(static_cast<size_t>(n));
+  std::vector<double> vy(static_cast<size_t>(n));
+  std::vector<double> vz(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    vx[static_cast<size_t>(i)] = 0.02 * ((i % 5) - 2);
+    vy[static_cast<size_t>(i)] = 0.015 * ((i % 4) - 1);
+    vz[static_cast<size_t>(i)] = 0.01 * ((i % 3) - 1);
+  }
+  constexpr double dt = 0.005;
+  constexpr double mass = 1.0;
+  tilemd::ref::System cpu_system = origin;
+  tilemd::ref::Dynamics cpu = tilemd::ref::MakeDynamics(origin, vx, vy, vz);
+  for (int step = 0; step < kSteps; ++step) {
+    tilemd::ref::VelocityVerletStep(cpu_system, cpu, dt, mass);
+  }
+
+  tilemd::HostSystem host = FromReference(origin, 0.3, 0, true);
+  host.dt = dt;
+  host.mass = mass;
+  host.graph_unroll = kUnroll;
+  host.vx = vx;
+  host.vy = vy;
+  host.vz = vz;
+  tilemd::Engine engine(std::move(host));
+  engine.Run(kSteps);
+  std::vector<double> x;
+  std::vector<double> y;
+  std::vector<double> z;
+  std::vector<double> gvx;
+  std::vector<double> gvy;
+  std::vector<double> gvz;
+  engine.DownloadPositions(x, y, z);
+  engine.DownloadVelocities(gvx, gvy, gvz);
+  const double moved =
+      std::max(MaxAbsDelta(cpu.x, origin.x),
+               std::max(MaxAbsDelta(cpu.y, origin.y), MaxAbsDelta(cpu.z, origin.z)));
+  const double max_x =
+      std::max(MaxAbsDelta(x, cpu.x), std::max(MaxAbsDelta(y, cpu.y), MaxAbsDelta(z, cpu.z)));
+  const double max_v = std::max(MaxAbsDelta(gvx, cpu.vx),
+                                std::max(MaxAbsDelta(gvy, cpu.vy), MaxAbsDelta(gvz, cpu.vz)));
+  std::cout << std::scientific << std::setprecision(8) << "tail graph 1000 moved " << moved
+            << " max |dx| " << max_x << " max |dv| " << max_v << "\n";
+  ASSERT_EQ(x.size(), static_cast<size_t>(n));
+  EXPECT_GT(moved, 1.0e-2);
+  EXPECT_LT(max_x, 1.0e-6);
+  EXPECT_LT(max_v, 1.0e-6);
 }
